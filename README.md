@@ -43,37 +43,7 @@ paths:
 
 The metadata CSV should contain CFP image paths, paired FFA image paths, disease labels, and patient identifiers. The mask CSV stores the RV, FAZ, MA, NPA, and NV mask paths used for TPG construction.
 
-## Step 1: Inspect Metadata
-
-```bash
-python scripts/inspect_csv.py \
-  --csv path/to/metadata.csv \
-  --output outputs/logs/csv_inspection.txt
-```
-
-Output:
-
-- `outputs/logs/csv_inspection.txt`
-
-This step records the detected CFP, FFA, label, patient, report, split/fold, and mask columns.
-
-## Step 2: Create Patient-Level Splits
-
-```bash
-python scripts/make_splits.py \
-  --csv path/to/metadata.csv \
-  --output outputs/folds/patient_level_5fold_split.csv \
-  --n_folds 5 \
-  --seed 42
-```
-
-Output:
-
-- `outputs/folds/patient_level_5fold_split.csv`
-
-Each fold uses one patient-level split for testing, the remaining data for training, and a validation subset from the training patients.
-
-## Step 3: Train RetinaBERT
+## Step 1: Train RetinaBERT
 
 ```bash
 python train/pretrain_retinabert.py \
@@ -87,7 +57,7 @@ Output:
 
 The trained RetinaBERT checkpoint is used to initialize the Semantic Chain Graph nodes from `SGC_nodes.txt`.
 
-## Step 4: Build TPG Features
+## Step 2: Build TPG Features
 
 ```bash
 python scripts/build_tpg_features.py \
@@ -108,7 +78,7 @@ paths:
   tpg_feature_csv: outputs/tpg_features/tpg_feature_index.csv
 ```
 
-## Step 5: Train FFA Teacher
+## Step 3: Train FFA Teacher
 
 ```bash
 python train/train_ffa_teacher.py \
@@ -123,7 +93,7 @@ Output:
 
 Repeat with `--fold 1` to `--fold 4` for the remaining folds.
 
-## Step 6: Train CFP Student
+## Step 4: Train CFP Student
 
 ```bash
 python train/train_cfp_student.py \
@@ -145,22 +115,6 @@ This stage optimizes:
 - row-wise topology response distillation loss.
 
 Repeat with `--fold 1` to `--fold 4` using the corresponding teacher checkpoints.
-
-## Step 7: Run Full 5-Fold Training
-
-The complete cross-validation pipeline can be launched with:
-
-```bash
-python train/train_5fold.py \
-  --config configs/default.yaml \
-  --csv path/to/metadata.csv
-```
-
-Final outputs:
-
-- `outputs/results/retinadual_5fold_results.csv`
-- `outputs/results/summary_mean_std.txt`
-- per-fold checkpoints, logs, metrics, and confusion matrices.
 
 ## Evaluation
 

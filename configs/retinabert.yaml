@@ -1,0 +1,20 @@
+extends: configs/default.yaml
+strict_reproduction: true
+paths:
+  output_dir: outputs
+  checkpoints: outputs/checkpoints
+  logs: outputs/logs
+  umls_concepts: resources/umls_retina_concepts.csv
+  retinabert_ckpt: outputs/checkpoints/retinabert.pth
+retinabert:
+  pretrained_name: emilyalsentzer/Bio_ClinicalBERT
+  epochs: 100
+  batch_size: 64
+  lr: 5.0e-5
+  beta1: 0.9
+  beta2: 0.999
+  eps: 1.0e-8
+  weight_decay: 0.2
+  warmup_steps: 10000
+  tau: 0.07
+  semantic_types: [T033, T047]

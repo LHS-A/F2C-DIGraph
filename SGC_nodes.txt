@@ -1,0 +1,79 @@
+Normal: no clinically significant retinal abnormalities are observed and retinal structures appear within normal limits
+
+Diabetic Retinopathy: a retinal microvascular disease caused by diabetes mellitus characterized by vascular damage and retinal ischemia
+
+Age-Related Macular Degeneration: a degenerative retinal disease affecting the macula and causing progressive central vision loss
+
+Retinal Vein Occlusion: retinal vascular occlusion caused by obstruction of retinal venous circulation resulting in retinal ischemia and hemorrhage
+
+Central Serous Chorioretinopathy: a retinal disorder characterized by serous detachment of the neurosensory retina due to choroidal dysfunction
+
+Retinal Vasculature: the network of retinal arteries, veins, and capillaries supplying blood to the retina
+
+Retina: the light-sensitive neural tissue lining the inner surface of the eye
+
+Macula: the central region of the retina responsible for detailed central vision
+
+Retinal Pigment Epithelium: a pigmented cellular layer supporting photoreceptor function and retinal metabolism
+
+Choroid: the vascular layer between the retina and sclera supplying oxygen and nutrients to the outer retina
+
+Retinal Veins: venous vessels responsible for draining blood from the retina
+
+Retinal Capillary Network: the microvascular capillary system supplying retinal tissue
+
+microaneurysms: small red dots on the retina, usually the earliest sign of diabetic retinopathy
+
+intraretinal microvascular abnormalities: abnormal tiny blood vessels growing within the retina due to retinal ischemia
+
+venous beading: irregular dilation and constriction of retinal veins associated with retinal ischemia
+
+retinal neovascularization: abnormal new blood vessels growing on the retinal surface due to ischemia
+
+hard exudates: small, yellowish-white lipid deposits on the retina
+
+cotton wool spots: fluffy white patches on the retina, indicating localized nerve fiber layer damage
+
+retinal hemorrhage: bleeding within the retinal tissue
+
+ischemic retina: retinal regions demonstrating extensive capillary dropout and poor perfusion
+
+macular ischemia: reduced macular perfusion associated with abnormalities of the foveal avascular zone
+
+foveal avascular zone: the capillary-free region located at the center of the macula responsible for sharp vision
+
+drusen: small yellowish deposits beneath the retina
+
+geographic atrophy: large areas of retinal pigment epithelium and photoreceptor loss causing blind spots
+
+window defect: increased fluorescence due to retinal pigment epithelium loss allowing greater visualization of choroidal fluorescence
+
+choroidal neovascularization: abnormal new blood vessels growing beneath the retina
+
+choroidal filling: appearance of fluorescein within the choroidal circulation during angiography
+
+retinal distortion: straight lines may appear wavy or curved due to retinal surface distortion
+
+central scotoma: a central area of reduced or absent vision affecting the visual field
+
+blood vessel dilation: retinal veins appear widened and tortuous
+
+vascular tortuosity: abnormal twisting and curvature of retinal blood vessels demonstrated during angiography
+
+capillary nonperfusion: areas lacking retinal capillary blood flow appearing as hypofluorescent regions
+
+arteriovenous transit: passage of fluorescein dye from retinal arteries to retinal veins during angiography
+
+dot and blot hemorrhages: small to medium-sized red retinal hemorrhages
+
+blocked fluorescence: reduced fluorescence caused by blood, pigment, or other material obscuring underlying fluorescence
+
+fluorescein leakage: progressive spread of fluorescein dye indicating breakdown of the blood-retinal barrier
+
+pooling: accumulation of fluorescein dye within a fluid-filled anatomical space
+
+subretinal fluid: accumulation of fluid between the neurosensory retina and the retinal pigment epithelium
+
+serous retinal detachment: elevation of the neurosensory retina caused by subretinal fluid accumulation
+
+pigment epithelial detachment: localized separation of the retinal pigment epithelium from the underlying Bruch membrane

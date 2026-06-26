@@ -1,0 +1,16 @@
+extends: configs/default.yaml
+mode: train_teacher
+strict_reproduction: true
+data:
+  image_size: 512
+  n_folds: 5
+  val_fraction: 0.15
+  num_workers: 4
+  classes: [AMD, CSC, DR, RVO, Normal]
+  ffa_frames: 3
+training:
+  epochs: 100
+  batch_size: 24
+  lr: 1.0e-4
+  weight_decay: 1.0e-3
+  warmup_epochs: 5

@@ -1,0 +1,12 @@
+extends: configs/default.yaml
+mode: train_student
+strict_reproduction: true
+training:
+  epochs: 100
+  batch_size: 24
+  lr: 1.0e-4
+  weight_decay: 1.0e-3
+  warmup_epochs: 5
+  lambda_sem_max: 0.4
+  lambda_topo_max: 0.2
+  distill_warmup_fraction: 0.3

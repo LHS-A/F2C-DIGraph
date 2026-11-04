@@ -28,7 +28,7 @@ def main():
     parser.add_argument("--mask_csv", required=True)
     parser.add_argument("--output_dir", default="outputs/tpg_features")
     parser.add_argument("--index_csv", default="outputs/tpg_features/tpg_feature_index.csv")
-    parser.add_argument("--image_size", type=int, default=512)
+    parser.add_argument("--image_size", type=int, default=1024)
     parser.add_argument("--rho_cross", type=float, default=0.1)
     args = parser.parse_args()
 
@@ -46,7 +46,13 @@ def main():
         sample_id = str(row.get(schema.patient_col, f"sample_{i}"))
         npz_name = f"{i:06d}_{abs(hash(sample_id)) % (10**8)}.npz"
         npz_path = out_dir / npz_name
-        np.savez_compressed(npz_path, features=tpg.features, adjacency=tpg.adjacency, node_types=tpg.node_types)
+        np.savez_compressed(
+            npz_path,
+            features=tpg.features,
+            adjacency=tpg.adjacency,
+            candidate_mask=tpg.candidate_mask,
+            node_types=tpg.node_types,
+        )
         cfp_path = ""
         if schema.cfp_cols:
             cfp_path = normalize_path_string(row[schema.cfp_cols[0]])

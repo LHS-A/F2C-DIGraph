@@ -1,4 +1,4 @@
-"""Topological Parameter Graph feature extraction from FFA masks."""
+"""Topological Parameter Graph construction from registered FFA masks."""
 
 from __future__ import annotations
 
@@ -11,200 +11,245 @@ import numpy as np
 from scipy.spatial.distance import cdist
 from skimage import measure, morphology
 
-MASK_TYPES = ("RV", "FAZ", "MA", "NPA", "NV")
-TYPE_TO_INDEX = {name: i for i, name in enumerate(MASK_TYPES)}
+
+MASK_TYPES = ("RV", "MA", "NPA", "NV", "LEAKAGE")
+TYPE_TO_INDEX = {name: index for index, name in enumerate(MASK_TYPES)}
 
 
 @dataclass
 class TPG:
     features: np.ndarray
     adjacency: np.ndarray
+    candidate_mask: np.ndarray
     node_types: np.ndarray
 
 
 def _read_mask(path: str, image_size: int) -> np.ndarray:
-    p = Path(path)
-    if not p.exists():
-        raise FileNotFoundError(f"Required FFA segmentation mask not found: {path}")
-    img = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
-    if img is None:
-        raise ValueError(f"Could not read mask: {path}")
-    img = cv2.resize(img, (image_size, image_size), interpolation=cv2.INTER_NEAREST)
-    return img > 0
+    image = cv2.imread(str(Path(path)), cv2.IMREAD_GRAYSCALE)
+    if image is None:
+        raise FileNotFoundError(f"Could not read FFA structure mask: {path}")
+    return cv2.resize(image, (image_size, image_size), interpolation=cv2.INTER_NEAREST) > 0
 
 
-def _merge_masks(paths: Sequence[str], image_size: int) -> np.ndarray:
-    masks = [_read_mask(p, image_size) for p in paths if p]
-    if not masks:
-        return np.zeros((image_size, image_size), dtype=bool)
-    out = np.zeros_like(masks[0], dtype=bool)
-    for mask in masks:
-        out |= mask
-    return out
+def merge_mask_paths(paths: Sequence[str], image_size: int) -> np.ndarray:
+    merged = np.zeros((image_size, image_size), dtype=bool)
+    for path in paths:
+        if path:
+            merged |= _read_mask(path, image_size)
+    return merged
 
 
 def _fractal_dimension(mask: np.ndarray) -> float:
-    mask = mask.astype(bool)
-    sizes = 2 ** np.arange(1, int(np.log2(min(mask.shape))) - 1)
-    counts = []
+    sizes = 2 ** np.arange(1, max(2, int(np.log2(min(mask.shape))) - 1))
+    counts, used_sizes = [], []
     for size in sizes:
-        rows = mask.shape[0] // size
-        cols = mask.shape[1] // size
+        rows, cols = mask.shape[0] // size, mask.shape[1] // size
         if rows == 0 or cols == 0:
             continue
-        trimmed = mask[: rows * size, : cols * size]
-        blocks = trimmed.reshape(rows, size, cols, size).any(axis=(1, 3))
-        counts.append(blocks.sum())
-    if len(counts) < 2 or any(c <= 0 for c in counts):
+        blocks = mask[: rows * size, : cols * size].reshape(rows, size, cols, size).any(axis=(1, 3))
+        count = int(blocks.sum())
+        if count:
+            counts.append(count)
+            used_sizes.append(size)
+    if len(counts) < 2:
         return 0.0
-    coeffs = np.polyfit(np.log(1.0 / sizes[: len(counts)]), np.log(counts), 1)
-    return float(coeffs[0])
+    return float(np.polyfit(np.log(1.0 / np.asarray(used_sizes)), np.log(counts), 1)[0])
 
 
-def _component_features(mask: np.ndarray, node_type: str) -> Tuple[List[np.ndarray], List[Tuple[float, float]], List[np.ndarray]]:
-    label = measure.label(mask)
-    feats: List[np.ndarray] = []
-    centroids: List[Tuple[float, float]] = []
-    boundaries: List[np.ndarray] = []
-    for region in measure.regionprops(label):
+def _component_features(
+    mask: np.ndarray, node_type: str
+) -> Tuple[List[np.ndarray], List[Tuple[float, float]], List[np.ndarray]]:
+    labels = measure.label(mask, connectivity=2)
+    features, centroids, boundaries = [], [], []
+    for region in measure.regionprops(labels):
         if region.area <= 2:
             continue
-        comp = label == region.label
-        perimeter = float(region.perimeter or 1.0)
+        component = labels == region.label
         area = float(region.area)
-        circularity = float(4.0 * np.pi * area / (perimeter * perimeter + 1e-6))
-        solidity = float(region.solidity or 0.0)
-        eccentricity = float(region.eccentricity or 0.0)
-        eq_diameter = float(region.equivalent_diameter_area)
-        hull_area = float(region.area_convex or area)
-        minr, minc, maxr, maxc = region.bbox
-        aspect = float((maxc - minc + 1) / (maxr - minr + 1))
-        if node_type == "FAZ":
-            acircularity = float(perimeter * perimeter / (4.0 * np.pi * area + 1e-6))
-            vec = np.array([area, perimeter, acircularity, solidity], dtype=np.float32)
+        perimeter = float(region.perimeter)
+        if node_type == "MA":
+            vector = [area, perimeter, 4.0 * np.pi * area / (perimeter * perimeter + 1e-6), region.eccentricity]
         elif node_type == "NPA":
-            vec = np.array([area, eccentricity, hull_area, eq_diameter], dtype=np.float32)
-        elif node_type == "MA":
-            vec = np.array([area, perimeter, circularity, eccentricity], dtype=np.float32)
+            vector = [area, region.eccentricity, region.area_convex, region.equivalent_diameter_area]
         elif node_type == "NV":
-            vec = np.array([area, _fractal_dimension(comp), solidity, aspect], dtype=np.float32)
+            min_row, min_col, max_row, max_col = region.bbox
+            aspect = (max_col - min_col + 1.0) / (max_row - min_row + 1.0)
+            vector = [area, _fractal_dimension(component), region.solidity, aspect]
+        elif node_type == "LEAKAGE":
+            vector = [area, perimeter, region.axis_major_length, region.axis_minor_length]
         else:
-            vec = np.array([area, perimeter, circularity, solidity], dtype=np.float32)
-        boundary = measure.find_contours(comp.astype(float), 0.5)
-        boundary_points = np.concatenate(boundary, axis=0) if boundary else np.argwhere(comp)
-        feats.append(vec)
+            raise ValueError(f"Unsupported TPG structure: {node_type}")
+        contours = measure.find_contours(component.astype(np.float32), 0.5)
+        boundary = np.concatenate(contours) if contours else np.argwhere(component)
+        features.append(np.asarray(vector, dtype=np.float32))
         centroids.append(tuple(region.centroid))
-        boundaries.append(boundary_points.astype(np.float32))
-    return feats, centroids, boundaries
+        boundaries.append(boundary.astype(np.float32))
+    return features, centroids, boundaries
 
 
-def _rv_features(mask: np.ndarray) -> Tuple[List[np.ndarray], List[Tuple[float, float]], List[np.ndarray], List[int]]:
-    skeleton = morphology.skeletonize(mask)
-    skel_u8 = (skeleton.astype(np.uint8) * 255)
-    corners = cv2.goodFeaturesToTrack(skel_u8, maxCorners=512, qualityLevel=0.01, minDistance=3)
-    endpoints = []
+def _neighbor_count(skeleton: np.ndarray) -> np.ndarray:
     kernel = np.ones((3, 3), dtype=np.uint8)
-    neighbor_count = cv2.filter2D(skeleton.astype(np.uint8), -1, kernel)
-    for y, x in np.argwhere(skeleton & (neighbor_count <= 2)):
-        endpoints.append((float(y), float(x)))
-    keypoints = endpoints
-    if corners is not None:
-        for c in corners.reshape(-1, 2):
-            x, y = c
-            yy, xx = int(round(y)), int(round(x))
-            if 0 <= yy < skeleton.shape[0] and 0 <= xx < skeleton.shape[1] and skeleton[yy, xx]:
-                if neighbor_count[yy, xx] >= 4:
-                    keypoints.append((float(yy), float(xx)))
-    label = measure.label(skeleton)
-    feats: List[np.ndarray] = []
-    centroids: List[Tuple[float, float]] = []
-    boundaries: List[np.ndarray] = []
-    shared_keys: List[int] = []
-    distance = cv2.distanceTransform(mask.astype(np.uint8), cv2.DIST_L2, 3)
-    for region in measure.regionprops(label):
-        if region.area <= 3:
-            continue
+    kernel[1, 1] = 0
+    return cv2.filter2D(skeleton.astype(np.uint8), -1, kernel, borderType=cv2.BORDER_CONSTANT)
+
+
+def _rv_features(
+    vessel_mask: np.ndarray,
+) -> Tuple[List[np.ndarray], List[Tuple[float, float]], List[np.ndarray], List[set[int]]]:
+    """Split the skeleton into keypoint-to-keypoint vessel segments.
+
+    Degree-four keypoint clusters are treated as crossings, while degree-three
+    (or higher non-crossing) clusters are retained as true bifurcations.
+    """
+    skeleton = morphology.skeletonize(vessel_mask)
+    degree = _neighbor_count(skeleton)
+    critical = skeleton & (degree != 2)
+    critical_labels = measure.label(critical, connectivity=2)
+    true_bifurcations: set[int] = set()
+    for region in measure.regionprops(critical_labels):
+        cluster = critical_labels == region.label
+        dilation_ring = morphology.binary_dilation(cluster, morphology.square(3)) & skeleton & ~cluster
+        outgoing = measure.label(dilation_ring, connectivity=2).max()
+        if outgoing == 3 or outgoing >= 5:
+            true_bifurcations.add(region.label)
+
+    corridors = skeleton & ~critical
+    corridor_labels = measure.label(corridors, connectivity=2)
+    distance = cv2.distanceTransform(vessel_mask.astype(np.uint8), cv2.DIST_L2, 5)
+    features, centroids, boundaries, shared = [], [], [], []
+    for region in measure.regionprops(corridor_labels):
         coords = region.coords
-        length = float(len(coords))
-        minr, minc, maxr, maxc = region.bbox
-        chord = float(np.linalg.norm(np.array([maxr - minr, maxc - minc], dtype=np.float32)) + 1e-6)
-        tortuosity = length / chord
+        if coords.shape[0] < 2:
+            continue
+        corridor = corridor_labels == region.label
+        adjacent = morphology.binary_dilation(corridor, morphology.square(3)) & critical
+        key_ids = set(np.unique(critical_labels[adjacent]).tolist()) - {0}
+        bif_ids = key_ids & true_bifurcations
+        length = float(coords.shape[0])
+        endpoints = coords[np.argmax(cdist(coords[[0]], coords), axis=1)[0]]
+        start = coords[0]
+        chord = float(np.linalg.norm(endpoints.astype(float) - start.astype(float)).clip(min=1e-6))
         radii = distance[coords[:, 0], coords[:, 1]]
-        radius_var = float(np.std(radii))
-        area = float(mask[coords[:, 0], coords[:, 1]].sum())
-        feats.append(np.array([area, length, tortuosity, radius_var], dtype=np.float32))
+        area = float(np.maximum(2.0 * radii, 1.0).sum())
+        features.append(np.asarray([area, length, length / chord, np.std(radii)], dtype=np.float32))
         centroids.append(tuple(coords.mean(axis=0)))
         boundaries.append(coords.astype(np.float32))
-        if keypoints:
-            d = cdist(coords.astype(float), np.asarray(keypoints))
-            shared_keys.append(int(d.min(axis=0).argmin()))
-        else:
-            shared_keys.append(len(shared_keys))
-    return feats, centroids, boundaries, shared_keys
+        shared.append(bif_ids)
+
+    # A closed vessel loop has no keypoint and therefore no corridor after the
+    # usual split; retain each such skeleton component as one segment.
+    if not features and skeleton.any():
+        for region in measure.regionprops(measure.label(skeleton, connectivity=2)):
+            coords = region.coords
+            radii = distance[coords[:, 0], coords[:, 1]]
+            length = float(coords.shape[0])
+            features.append(np.asarray([np.maximum(2.0 * radii, 1.0).sum(), length, 1.0, np.std(radii)], dtype=np.float32))
+            centroids.append(tuple(coords.mean(axis=0)))
+            boundaries.append(coords.astype(np.float32))
+            shared.append(set())
+    return features, centroids, boundaries, shared
 
 
-def _connect_ordered(adj: np.ndarray, indices: List[int], centroids: List[Tuple[float, float]]) -> None:
+def _minimum_boundary_distance(left: np.ndarray, right: np.ndarray) -> float:
+    if left.size == 0 or right.size == 0:
+        return float("inf")
+    return float(cdist(left, right).min())
+
+
+def _ordered_edges(
+    adjacency: np.ndarray,
+    indices: List[int],
+    centroids: List[Tuple[float, float]],
+    threshold: float,
+) -> None:
     if len(indices) < 2:
         return
-    pts = np.asarray([centroids[i] for i in indices], dtype=np.float32)
-    pts_centered = pts - pts.mean(axis=0, keepdims=True)
-    _, _, vt = np.linalg.svd(pts_centered, full_matrices=False)
-    axis = vt[0]
-    order = np.argsort(pts_centered @ axis)
-    ordered = [indices[i] for i in order]
-    for a, b in zip(ordered[:-1], ordered[1:]):
-        adj[a, b] = adj[b, a] = 1.0
+    points = np.asarray([centroids[index] for index in indices], dtype=np.float32)
+    centered = points - points.mean(axis=0, keepdims=True)
+    first_axis = np.linalg.svd(centered, full_matrices=False)[2][0]
+    order = np.argsort(centered @ first_axis)
+    for left_position, right_position in zip(order[:-1], order[1:]):
+        left, right = indices[left_position], indices[right_position]
+        if np.linalg.norm(points[left_position] - points[right_position]) < threshold:
+            adjacency[left, right] = adjacency[right, left] = 1.0
 
 
-def _min_boundary_distance(a: np.ndarray, b: np.ndarray) -> float:
-    if len(a) == 0 or len(b) == 0:
-        return float("inf")
-    return float(cdist(a, b).min())
-
-
-def build_tpg_from_masks(mask_paths: Dict[str, Sequence[str]], image_size: int = 512, rho_cross: float = 0.1) -> TPG:
-    """Build TPG nodes and clinically guided adjacency from phase-merged masks."""
+def build_tpg_from_arrays(
+    masks: Dict[str, np.ndarray], rho_cross: float = 0.1, kappa: int = 8
+) -> TPG:
+    """Build B0 and the sparse dynamic candidate mask from aligned masks."""
+    if set(masks) != set(MASK_TYPES):
+        missing = set(MASK_TYPES) - set(masks)
+        raise ValueError(f"TPG masks must contain {MASK_TYPES}; missing {sorted(missing)}")
+    shape = next(iter(masks.values())).shape
     features: List[np.ndarray] = []
     centroids: List[Tuple[float, float]] = []
     boundaries: List[np.ndarray] = []
     node_types: List[int] = []
-    rv_shared: List[int] = []
+    rv_shared: List[set[int]] = []
     by_type: Dict[str, List[int]] = {name: [] for name in MASK_TYPES}
 
     for mask_type in MASK_TYPES:
-        merged = _merge_masks(mask_paths.get(mask_type, []), image_size)
+        mask = masks[mask_type].astype(bool)
         if mask_type == "RV":
-            feats, cents, bounds, shared = _rv_features(merged)
-            rv_shared = shared
+            type_features, type_centroids, type_boundaries, rv_shared = _rv_features(mask)
         else:
-            feats, cents, bounds = _component_features(merged, mask_type)
-        for vec, cen, bound in zip(feats, cents, bounds):
+            type_features, type_centroids, type_boundaries = _component_features(mask, mask_type)
+        for vector, centroid, boundary in zip(type_features, type_centroids, type_boundaries):
             by_type[mask_type].append(len(features))
-            features.append(vec)
-            centroids.append(cen)
-            boundaries.append(bound)
+            features.append(vector)
+            centroids.append(centroid)
+            boundaries.append(boundary)
             node_types.append(TYPE_TO_INDEX[mask_type])
 
     if not features:
-        raise ValueError("No TPG nodes were extracted from the provided masks.")
+        return TPG(
+            np.zeros((0, 4), np.float32), np.zeros((0, 0), np.float32),
+            np.zeros((0, 0), bool), np.zeros((0,), np.int64)
+        )
+    x = np.nan_to_num(np.stack(features).astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+    count = len(features)
+    adjacency = np.eye(count, dtype=np.float32)
+    for local_left, global_left in enumerate(by_type["RV"]):
+        for local_right, global_right in enumerate(by_type["RV"]):
+            if local_left < local_right and (rv_shared[local_left] & rv_shared[local_right]):
+                adjacency[global_left, global_right] = adjacency[global_right, global_left] = 1.0
 
-    x = np.stack(features).astype(np.float32)
-    x = np.nan_to_num(x)
-    x = np.log1p(np.maximum(x, 0.0))
-    adj = np.eye(len(x), dtype=np.float32)
-    for i, a in enumerate(by_type["RV"]):
-        for j, b in enumerate(by_type["RV"]):
-            if i < j and rv_shared[i] == rv_shared[j]:
-                adj[a, b] = adj[b, a] = 1.0
-    for mask_type in ("FAZ", "NPA", "MA", "NV"):
-        _connect_ordered(adj, by_type[mask_type], centroids)
+    threshold = rho_cross * float(np.hypot(*shape))
+    for mask_type in MASK_TYPES[1:]:
+        _ordered_edges(adjacency, by_type[mask_type], centroids, threshold)
 
-    diag = (2.0 ** 0.5) * image_size
-    threshold = rho_cross * diag
-    pairs = [("RV", "FAZ"), ("RV", "NPA"), ("RV", "MA"), ("RV", "NV"), ("MA", "NPA"), ("NPA", "NV"), ("FAZ", "NPA")]
-    for left, right in pairs:
-        for i in by_type[left]:
-            for j in by_type[right]:
-                if _min_boundary_distance(boundaries[i], boundaries[j]) < threshold:
-                    adj[i, j] = adj[j, i] = 1.0
-    return TPG(features=x, adjacency=adj, node_types=np.asarray(node_types, dtype=np.int64))
+    # Every node selects up to kappa nearest eligible nodes from each other type.
+    for source_type in MASK_TYPES:
+        for target_type in MASK_TYPES:
+            if source_type == target_type:
+                continue
+            for source in by_type[source_type]:
+                ranked = sorted(
+                    ((_minimum_boundary_distance(boundaries[source], boundaries[target]), target)
+                     for target in by_type[target_type]),
+                    key=lambda pair: pair[0],
+                )
+                for distance, target in ranked[:kappa]:
+                    if distance <= threshold:
+                        adjacency[source, target] = adjacency[target, source] = 1.0
+
+    candidate = adjacency.astype(bool)
+    for source in range(count):
+        ranked = sorted(
+            ((_minimum_boundary_distance(boundaries[source], boundaries[target]), target)
+             for target in range(count) if target != source),
+            key=lambda pair: pair[0],
+        )
+        for distance, target in ranked[:kappa]:
+            if distance <= 2.0 * threshold:
+                candidate[source, target] = candidate[target, source] = True
+    np.fill_diagonal(candidate, True)
+    return TPG(x, adjacency, candidate, np.asarray(node_types, dtype=np.int64))
+
+
+def build_tpg_from_masks(
+    mask_paths: Dict[str, Sequence[str]], image_size: int = 512, rho_cross: float = 0.1, kappa: int = 8
+) -> TPG:
+    masks = {name: merge_mask_paths(mask_paths.get(name, []), image_size) for name in MASK_TYPES}
+    return build_tpg_from_arrays(masks, rho_cross=rho_cross, kappa=kappa)

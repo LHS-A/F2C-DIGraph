@@ -99,10 +99,10 @@ def _infer_patient_col(df: pd.DataFrame) -> str:
 def _infer_mask_cols(columns: Sequence[str], allow_path_without_mask: bool = False) -> Dict[str, List[str]]:
     aliases = {
         "RV": ("rv", "vessel", "retinal_vessel"),
-        "FAZ": ("faz", "foveal"),
         "MA": ("ma", "microaneurysm"),
         "NPA": ("npa", "nonperfusion", "non_perfusion"),
         "NV": ("nv", "neovascular"),
+        "LEAKAGE": ("leakage", "leak", "extravasation"),
     }
     mask_cols: Dict[str, List[str]] = {}
     for key, keys in aliases.items():

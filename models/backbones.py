@@ -1,4 +1,4 @@
-"""Image encoders for CFP student and stacked-FFA teacher."""
+"""Image encoders for CFP and three-channel grayscale FFA inputs."""
 
 from __future__ import annotations
 
@@ -14,8 +14,12 @@ class ResNet50Encoder(nn.Module):
 
     def __init__(self, in_channels: int = 3, embed_dim: int = 768, pretrained: bool = True) -> None:
         super().__init__()
-        weights = models.ResNet50_Weights.IMAGENET1K_V2 if pretrained else None
-        resnet = models.resnet50(weights=weights)
+        try:
+            weights = models.ResNet50_Weights.IMAGENET1K_V2 if pretrained else None
+            resnet = models.resnet50(weights=weights)
+        except (AttributeError, TypeError):
+            # torchvision<0.13 uses the legacy ``pretrained`` argument.
+            resnet = models.resnet50(pretrained=pretrained)
         if in_channels != 3:
             old = resnet.conv1
             new = nn.Conv2d(in_channels, old.out_channels, old.kernel_size, old.stride, old.padding, bias=False)

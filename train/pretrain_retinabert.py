@@ -22,7 +22,8 @@ def run(config_path: str):
     cfg = load_config(config_path)
     seed_everything(cfg.get("seed", 42), cfg.get("deterministic", True))
     logger = setup_logger("retinabert", f"{cfg['paths']['logs']}/pretrain_retinabert.log")
-    samples = load_umls_knowledge(cfg["paths"]["umls_concepts"], cfg["retinabert"]["semantic_types"])
+    knowledge_path = cfg["paths"]["umls_concepts"]
+    samples = load_umls_knowledge(knowledge_path)
     dataset = UMLSContrastiveDataset(samples, cfg["retinabert"]["pretrained_name"])
     loader = DataLoader(dataset, batch_size=cfg["retinabert"]["batch_size"], shuffle=True, num_workers=0)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -51,8 +52,9 @@ def run(config_path: str):
             scheduler.step()
             total += float(loss.item())
         logger.info("epoch=%d loss=%.6f", epoch + 1, total / max(1, len(loader)))
-    save_checkpoint(cfg["paths"]["retinabert_ckpt"], {"model": model.state_dict(), "config": cfg, "pretrained_name": cfg["retinabert"]["pretrained_name"]})
-    logger.info("saved %s", cfg["paths"]["retinabert_ckpt"])
+    checkpoint_path = cfg["paths"]["retinabert_ckpt"]
+    save_checkpoint(checkpoint_path, {"model": model.state_dict(), "config": cfg, "pretrained_name": cfg["retinabert"]["pretrained_name"]})
+    logger.info("saved %s", checkpoint_path)
 
 
 if __name__ == "__main__":

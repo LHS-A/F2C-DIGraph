@@ -37,15 +37,19 @@ paths:
   csv: path/to/metadata.csv
   split_csv: outputs/folds/patient_level_5fold_split.csv
   mask_csv: path/to/mask_paths.csv
-  tpg_feature_csv: outputs/tpg_features/tpg_feature_index.csv
   retinabert_ckpt: outputs/checkpoints/retinabert.pth
 ```
 
-The metadata CSV should contain CFP image paths, paired FFA image paths, disease labels, and patient identifiers. The mask CSV stores the RV, FAZ, MA, NPA, and NV mask paths used for TPG construction.
+The metadata CSV should contain registered CFP paths, early/mid/late FFA paths, disease labels, patient identifiers, reports, and present/verified-absent/unavailable observation states. The mask CSV stores phase-specific RV, MA, NPA, NV, and leakage masks. Geometry is synchronized across CFP, FFA, valid-overlap masks, and structure masks; the TPG is rebuilt after augmentation.
 
 ## Step 1: Train RetinaBERT
 
 ```bash
+python scripts/build_retinabert_corpus.py \
+  --metadata_csv path/to/metadata.csv \
+  --umls_mapping_csv path/to/umls_mapping.csv \
+  --output_csv outputs/knowledge/umls_retina_concepts.csv
+
 python train/pretrain_retinabert.py \
   --config configs/retinabert.yaml
 ```
@@ -57,7 +61,7 @@ Output:
 
 The trained RetinaBERT checkpoint is used to initialize the Semantic Chain Graph nodes from `SGC_nodes.txt`.
 
-## Step 2: Build TPG Features
+## Optional: inspect/precompute unaugmented TPG features
 
 ```bash
 python scripts/build_tpg_features.py \
@@ -71,12 +75,7 @@ Output:
 - `outputs/tpg_features/*.npz`
 - `outputs/tpg_features/tpg_feature_index.csv`
 
-Set the generated index in the config:
-
-```yaml
-paths:
-  tpg_feature_csv: outputs/tpg_features/tpg_feature_index.csv
-```
+Training does not consume cached TPGs because the method rebuilds each graph after synchronized geometric augmentation.
 
 ## Step 3: Train FFA Teacher
 
@@ -112,7 +111,7 @@ This stage optimizes:
 
 - disease classification loss,
 - graph-aware semantic distillation loss,
-- row-wise topology response distillation loss.
+- category-balanced Bernoulli topology response distillation loss.
 
 Repeat with `--fold 1` to `--fold 4` using the corresponding teacher checkpoints.
 
@@ -136,7 +135,7 @@ Reported metrics include accuracy, one-vs-rest macro AUC, per-class accuracy, pe
 
 ## Inference
 
-For inference, use the trained CFP student checkpoint. The FFA teacher and FFA-only graph construction modules are not used during deployment.
+For inference, the exported checkpoint retains only the CFP encoder, topology adapter, classification head, and fixed semantic basis. FFA, S-DynEnc, T-DynEnc, segmentation masks, and distillation-only projections are not used during deployment.
 
 ```bash
 python train/evaluate.py \

@@ -1,4 +1,4 @@
-cui,concept,definition,semantic_type,relation,tail_concept
-C0242383,Age-related macular degeneration,Age-related loss of central vision secondary to macular retinal degeneration,T047,has finding site,Macula lutea
-C0015397,Microaneurysm,A small localized dilation of a blood vessel,T033,associated with,Diabetic retinopathy
+entity,cui,concept,definition,synonyms,semantic_type,relation,tail_concept
+age-related macular degeneration,C0242383,Age-related macular degeneration,Age-related loss of central vision secondary to macular retinal degeneration,AMD;macular degeneration,T047,has finding site,Macula lutea
+microaneurysm,C0015397,Microaneurysm,A small localized dilation of a blood vessel,retinal microaneurysm,T033,associated with,Diabetic retinopathy
 

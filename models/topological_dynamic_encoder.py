@@ -11,80 +11,113 @@ from torch import nn
 
 
 class TypeBranch(nn.Module):
-    """Category-specific FC + BatchNorm + ReLU branch for raw 4-D node features."""
+    """Category-specific FC--LN--ReLU projection of four measurements."""
 
     def __init__(self, dim: int) -> None:
         super().__init__()
         self.fc = nn.Linear(4, dim)
-        self.bn = nn.BatchNorm1d(dim)
+        self.ln = nn.LayerNorm(dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        z = self.fc(x)
-        if z.shape[0] > 1:
-            z = self.bn(z)
-        return F.relu(z)
+        return F.relu(self.ln(self.fc(torch.log1p(x.clamp_min(0.0)))))
 
 
 class TopologicalDynamicLayer(nn.Module):
     def __init__(self, dim: int = 768) -> None:
         super().__init__()
-        self.wp = nn.Linear(dim, dim)
-        self.wg = nn.Linear(dim, dim)
-        self.beta = nn.Parameter(torch.zeros(()))
-        self.msg = nn.Linear(dim * 2, dim)
+        self.affinity_q = nn.Linear(dim, dim)
+        self.affinity_k = nn.Linear(dim, dim)
+        self.message = nn.Linear(dim, dim)
         self.ln = nn.LayerNorm(dim)
 
-    def forward(self, z: torch.Tensor, b0: torch.Tensor) -> torch.Tensor:
-        p = self.wp(z)
-        g = self.wg(z)
-        s = torch.softmax((p @ g.t()) / math.sqrt(p.shape[-1]), dim=-1)
-        b = F.relu(b0 + self.beta * s)
-        m = (b @ z) / b.sum(dim=-1, keepdim=True).clamp_min(1e-6)
-        return self.ln(F.relu(self.msg(torch.cat([z, m], dim=-1))) + z)
+    def forward(
+        self,
+        z: torch.Tensor,
+        b0: torch.Tensor,
+        candidate_mask: torch.Tensor,
+        beta: torch.Tensor,
+    ) -> torch.Tensor:
+        q = self.affinity_q(z)
+        k = self.affinity_k(z)
+        signed = q @ k.t() / math.sqrt(q.shape[-1])
+        signed = 0.5 * (signed + signed.t())
+        b = F.relu(b0 + beta * (candidate_mask.to(z.dtype) * signed))
+        b = 0.5 * (b + b.t())
+        b = b.clone()
+        b.fill_diagonal_(1.0)
+        weights = b / b.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+        aggregated = weights @ z
+        return self.ln(z + F.relu(self.message(aggregated)))
 
 
 class TopologicalDynamicEncoder(nn.Module):
-    """Encode variable-size TPGs and pool into five topology bases."""
+    """Encode a variable-size TPG and pool RV/MA/NPA/NV/leakage bases."""
 
     def __init__(self, dim: int = 768, layers: int = 2, n_types: int = 5) -> None:
         super().__init__()
+        if layers != 2:
+            raise ValueError("The updated methodology specifies exactly two T-DynEnc layers.")
+        if n_types != 5:
+            raise ValueError("TPG must use RV, MA, NPA, NV, and leakage.")
+        self.dim = dim
         self.n_types = n_types
+        self.beta = nn.Parameter(torch.zeros(()))
         self.branches = nn.ModuleList([TypeBranch(dim) for _ in range(n_types)])
         self.layers = nn.ModuleList([TopologicalDynamicLayer(dim) for _ in range(layers)])
 
-    def encode_one(self, x: torch.Tensor, adj: torch.Tensor, node_types: torch.Tensor) -> torch.Tensor:
-        z = torch.zeros(x.shape[0], self.branches[0].fc.out_features, device=x.device, dtype=x.dtype)
-        for t, branch in enumerate(self.branches):
-            mask = node_types == t
-            if mask.any():
-                z[mask] = branch(x[mask]).to(dtype=z.dtype)
+    def encode_one(
+        self,
+        x: torch.Tensor,
+        adj: torch.Tensor,
+        candidate_mask: torch.Tensor,
+        node_types: torch.Tensor,
+    ) -> torch.Tensor:
+        if x.shape[0] == 0:
+            return x.new_zeros((self.n_types, self.dim))
+        z = x.new_zeros((x.shape[0], self.dim))
+        for type_index, branch in enumerate(self.branches):
+            selected = node_types == type_index
+            if selected.any():
+                z[selected] = branch(x[selected]).to(z.dtype)
         for layer in self.layers:
-            z = layer(z, adj)
-        pooled = []
-        for t in range(self.n_types):
-            mask = node_types == t
-            if mask.any():
-                pooled.append(z[mask].mean(dim=0))
-            else:
-                pooled.append(torch.zeros(z.shape[-1], device=z.device, dtype=z.dtype))
-        return torch.stack(pooled, dim=0)
+            z = layer(z, adj, candidate_mask, self.beta)
+        pooled = [
+            z[node_types == t].mean(dim=0) if (node_types == t).any() else z.new_zeros(self.dim)
+            for t in range(self.n_types)
+        ]
+        return torch.stack(pooled)
 
-    def forward(self, tpg_list: Union[List[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]], device: torch.device) -> torch.Tensor:
-        bases = []
+    def forward(
+        self,
+        tpg_list: Union[List[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]],
+        device: torch.device,
+    ) -> torch.Tensor:
         if isinstance(tpg_list, dict):
-            x_batch = tpg_list["x"].to(device)
-            adj_batch = tpg_list["adj"].to(device)
-            type_batch = tpg_list["node_types"].to(device)
-            mask_batch = tpg_list["node_mask"].to(device)
             iterable = []
-            for i in range(x_batch.shape[0]):
-                mask = mask_batch[i]
-                iterable.append({"x": x_batch[i, mask], "adj": adj_batch[i][mask][:, mask], "node_types": type_batch[i, mask]})
+            for i in range(tpg_list["x"].shape[0]):
+                selected = tpg_list["node_mask"][i].to(device)
+                adj = tpg_list["adj"][i].to(device)[selected][:, selected]
+                candidate = tpg_list["candidate_mask"][i].to(device)[selected][:, selected]
+                iterable.append(
+                    {
+                        "x": tpg_list["x"][i].to(device)[selected],
+                        "adj": adj,
+                        "candidate_mask": candidate,
+                        "node_types": tpg_list["node_types"][i].to(device)[selected],
+                    }
+                )
         else:
             iterable = tpg_list
+        bases = []
         for graph in iterable:
-            x = graph["x"].to(device)
-            adj = graph["adj"].to(device)
-            node_types = graph["node_types"].to(device)
-            bases.append(self.encode_one(x, adj, node_types))
-        return torch.stack(bases, dim=0)
+            bases.append(
+                self.encode_one(
+                    graph["x"].to(device),
+                    graph["adj"].to(device),
+                    graph["candidate_mask"].to(device),
+                    graph["node_types"].to(device),
+                )
+            )
+        if not bases:
+            return torch.empty((0, self.n_types, self.dim), device=device)
+        return torch.stack(bases)

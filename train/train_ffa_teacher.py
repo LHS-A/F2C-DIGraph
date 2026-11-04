@@ -1,4 +1,4 @@
-"""Train the stacked-FFA ResNet-50 teacher."""
+"""Train the three-channel grayscale FFA teacher with SIM and TIM."""
 
 import argparse
 import json
@@ -11,7 +11,7 @@ from tqdm import tqdm
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from models.f2c_digraph import FfaTeacher
-from train.common import build_loader, device_and_wrap, evaluate_classifier
+from train.common import build_loader, device_and_wrap, evaluate_classifier, load_semantic_initialization, move_batch_to_device
 from utils.checkpoint import save_checkpoint
 from utils.config import load_config
 from utils.logger import setup_logger
@@ -23,13 +23,21 @@ def run(config_path: str, fold: int):
     cfg = load_config(config_path)
     seed_everything(cfg.get("seed", 42) + fold, cfg.get("deterministic", True))
     logger = setup_logger(f"teacher_fold{fold}", f"{cfg['paths']['logs']}/fold{fold}_teacher.log")
-    train_loader = build_loader(cfg, "train", fold, train=True, require_masks=False)
-    val_loader = build_loader(cfg, "val", fold, train=False, require_masks=False)
+    train_loader = build_loader(cfg, "train", fold, train=True, require_masks=True)
+    val_loader = build_loader(cfg, "val", fold, train=False, require_masks=True)
+    init_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    e0, a0 = load_semantic_initialization(cfg["paths"]["retinabert_ckpt"], cfg, init_device)
     model = FfaTeacher(
         len(cfg["data"]["classes"]),
-        cfg["model"]["embed_dim"],
-        cfg["model"].get("pretrained", True),
-        cfg["model"].get("backbone", "resnet50"),
+        e0,
+        a0,
+        embed_dim=cfg["model"]["embed_dim"],
+        pretrained=cfg["model"].get("pretrained", True),
+        heads=cfg["model"]["heads"],
+        semantic_layers=cfg["model"]["semantic_layers"],
+        topology_layers=cfg["model"]["topology_layers"],
+        dropout=cfg["model"]["dropout"],
+        backbone=cfg["model"].get("backbone", "resnet50"),
     )
     model.is_teacher = True
     device, model = device_and_wrap(model, cfg.get("multi_gpu", True))
@@ -43,10 +51,11 @@ def run(config_path: str, fold: int):
         model.train()
         total = 0.0
         for batch in tqdm(train_loader, desc=f"teacher fold {fold} epoch {epoch + 1}"):
+            batch = move_batch_to_device(batch, device)
             opt.zero_grad(set_to_none=True)
             with torch.cuda.amp.autocast(enabled=scaler.is_enabled()):
-                logits = model(batch["ffa"].to(device))["logits"]
-                loss = torch.nn.functional.cross_entropy(logits, batch["label"].to(device))
+                logits = model(batch)["logits"]
+                loss = torch.nn.functional.cross_entropy(logits, batch["label"])
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg["training"].get("grad_clip_norm", 1.0))

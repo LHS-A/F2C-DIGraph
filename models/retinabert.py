@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, List
 import random
 
 import pandas as pd
@@ -15,42 +15,58 @@ from torch.utils.data import Dataset
 from transformers import AutoModel, AutoTokenizer
 
 
-REQUIRED_UMLS_COLUMNS = {"cui", "concept", "definition", "semantic_type"}
+REQUIRED_UMLS_COLUMNS = {
+    "cui", "concept", "definition", "synonyms", "semantic_type", "relation", "tail_concept"
+}
 
 
 @dataclass
 class KnowledgeSample:
     text: str
     cui: str
+    form: str
 
 
-def load_umls_knowledge(path: str, semantic_types: Iterable[str]) -> List[KnowledgeSample]:
+def load_umls_knowledge(path: str) -> List[KnowledgeSample]:
     """Load prepared UMLS concept-definition and relation-triplet samples."""
     if not Path(path).exists():
         raise FileNotFoundError(
             "Strict RetinaBERT pretraining requires a prepared UMLS concept file. "
-            f"Expected {path}. Required columns: cui, concept, definition, semantic_type, "
-            "and optional relation, tail_concept."
+            f"Expected {path}. Required columns: cui, concept, definition, synonyms, "
+            "semantic_type, relation, and tail_concept."
         )
     df = pd.read_csv(path)
     missing = REQUIRED_UMLS_COLUMNS - set(df.columns)
     if missing:
         raise ValueError(f"UMLS file is missing required columns: {sorted(missing)}")
-    df = df[df["semantic_type"].astype(str).isin(set(semantic_types))]
     samples: List[KnowledgeSample] = []
+    seen_definitions = set()
+    seen_relations = set()
     for _, row in df.iterrows():
         cui = str(row["cui"]).strip()
         concept = str(row["concept"]).strip()
         definition = str(row["definition"]).strip()
-        if cui and concept and definition:
-            samples.append(KnowledgeSample(f"{concept}. Definition: {definition}", cui))
-        if {"relation", "tail_concept"}.issubset(df.columns):
-            rel = str(row.get("relation", "")).strip()
-            tail = str(row.get("tail_concept", "")).strip()
-            if rel and tail and rel.lower() != "nan" and tail.lower() != "nan":
-                samples.append(KnowledgeSample(f"{concept} {rel} {tail}", cui))
+        definition_key = (cui, concept, definition)
+        if cui and concept and definition and definition.lower() != "nan" and definition_key not in seen_definitions:
+            samples.append(KnowledgeSample(f"{concept}. Definition: {definition}", cui, "definition"))
+            seen_definitions.add(definition_key)
+        relation = str(row["relation"]).strip()
+        tail = str(row["tail_concept"]).strip()
+        relation_key = (cui, concept, relation, tail)
+        if relation and tail and relation.lower() != "nan" and tail.lower() != "nan" and relation_key not in seen_relations:
+            samples.append(KnowledgeSample(f"{concept} {relation} {tail}", cui, "relation"))
+            seen_relations.add(relation_key)
+    forms: Dict[str, set] = {}
+    for sample in samples:
+        forms.setdefault(sample.cui, set()).add(sample.form)
+    incomplete = sorted(cui for cui, available in forms.items() if available != {"definition", "relation"})
+    if incomplete:
+        raise ValueError(
+            "Every CUI requires both a concept-definition and a concept-relation-concept description; "
+            f"incomplete CUIs: {incomplete[:10]}"
+        )
     if not samples:
-        raise ValueError("No usable UMLS samples after semantic-type filtering.")
+        raise ValueError("No usable UMLS concept descriptions were found.")
     return samples
 
 
@@ -62,9 +78,11 @@ class UMLSContrastiveDataset(Dataset):
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         self.cuis = sorted({s.cui for s in samples})
         self.cui_to_idx = {cui: i for i, cui in enumerate(self.cuis)}
-        self.by_cui: Dict[str, List[str]] = {cui: [] for cui in self.cuis}
+        self.by_cui: Dict[str, Dict[str, List[str]]] = {
+            cui: {"definition": [], "relation": []} for cui in self.cuis
+        }
         for sample in samples:
-            self.by_cui[sample.cui].append(sample.text)
+            self.by_cui[sample.cui][sample.form].append(sample.text)
         self.max_length = max_length
 
     def __len__(self) -> int:
@@ -72,8 +90,8 @@ class UMLSContrastiveDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         cui = self.cuis[idx]
-        texts = self.by_cui[cui]
-        pair = random.sample(texts, 2) if len(texts) >= 2 else [texts[0], texts[0]]
+        descriptions = self.by_cui[cui]
+        pair = [random.choice(descriptions["definition"]), random.choice(descriptions["relation"])]
         enc = self.tokenizer(
             pair,
             padding="max_length",
@@ -99,8 +117,9 @@ class RetinaBERT(nn.Module):
 
     def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         out = self.bert(input_ids=input_ids, attention_mask=attention_mask)
-        cls = out.last_hidden_state[:, 0]
-        return F.normalize(self.proj(cls), dim=-1)
+        weights = attention_mask.unsqueeze(-1).to(out.last_hidden_state.dtype)
+        mean_pooled = (out.last_hidden_state * weights).sum(dim=1) / weights.sum(dim=1).clamp_min(1.0)
+        return F.normalize(self.proj(mean_pooled), dim=-1)
 
     @torch.no_grad()
     def encode_texts(self, texts: List[str], tokenizer, device: torch.device, max_length: int = 96) -> torch.Tensor:

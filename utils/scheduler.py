@@ -26,6 +26,10 @@ def build_warmup_cosine_scheduler(
 
 def distill_weight(epoch: int, total_epochs: int, max_weight: float, warmup_fraction: float = 0.3) -> float:
     """Linear distillation-weight warm-up used by Eq. 16 in the paper."""
-    warmup = max(1.0, warmup_fraction * total_epochs)
-    return min(float(epoch + 1) / warmup, 1.0) * float(max_weight)
+    warmup_epochs = max(1, int(math.ceil(warmup_fraction * total_epochs)))
+    if warmup_epochs == 1:
+        progress = 0.0 if epoch <= 0 else 1.0
+    else:
+        progress = min(max(float(epoch) / float(warmup_epochs - 1), 0.0), 1.0)
+    return progress * float(max_weight)
 

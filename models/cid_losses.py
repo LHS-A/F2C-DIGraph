@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Tuple
-
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -16,29 +14,70 @@ def graph_normalize_adjacency(adj: torch.Tensor) -> torch.Tensor:
     return d_inv[:, None] * a * d_inv[None, :]
 
 
-class SemanticDistillationLoss(nn.Module):
-    """Graph-aware semantic KL divergence from FFA teacher to CFP student."""
-
-    def __init__(self, dim: int = 768) -> None:
-        super().__init__()
-        self.teacher_proj = nn.Linear(dim, dim)
-        self.student_proj = nn.Linear(dim, dim)
-
-    def relevance(self, v: torch.Tensor, h_sem: torch.Tensor, adj: torch.Tensor, mode: str) -> torch.Tensor:
-        proj = self.teacher_proj(v) if mode == "teacher" else self.student_proj(v)
-        scores = F.cosine_similarity(proj[:, None, :], h_sem[None, :, :], dim=-1)
-        abar = graph_normalize_adjacency(adj)
-        propagated = scores @ abar.t()
-        return torch.softmax(propagated, dim=-1)
-
-    def forward(self, v_teacher: torch.Tensor, v_student: torch.Tensor, h_sem: torch.Tensor, adj: torch.Tensor) -> torch.Tensor:
-        p_t = self.relevance(v_teacher, h_sem, adj, "teacher").detach()
-        p_s = self.relevance(v_student, h_sem, adj, "student")
-        return F.kl_div((p_s + 1e-8).log(), p_t, reduction="batchmean")
+def semantic_distribution(
+    visual_feature: torch.Tensor,
+    projection: nn.Module,
+    semantic_basis: torch.Tensor,
+    dynamic_adjacency: torch.Tensor,
+) -> torch.Tensor:
+    """Cosine node relevance followed by normalized-SCG propagation."""
+    projected = projection(visual_feature)
+    scores = F.cosine_similarity(projected[:, None, :], semantic_basis[None, :, :], dim=-1)
+    propagated = scores @ graph_normalize_adjacency(dynamic_adjacency).t()
+    return torch.softmax(propagated, dim=-1)
 
 
-def topology_response_loss(a_teacher: torch.Tensor, a_student: torch.Tensor) -> torch.Tensor:
-    """Row-wise topology KL divergence over five topology bases."""
-    p_t = a_teacher.detach().reshape(-1, a_teacher.shape[-1])
-    p_s = a_student.reshape(-1, a_student.shape[-1])
-    return F.kl_div((p_s + 1e-8).log(), p_t, reduction="batchmean")
+def semantic_distillation_loss(teacher_probability: torch.Tensor, student_probability: torch.Tensor) -> torch.Tensor:
+    return F.kl_div(student_probability.clamp_min(1e-8).log(), teacher_probability.detach(), reduction="batchmean")
+
+
+def _bernoulli_kl(target: torch.Tensor, prediction: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    p = target.detach().clamp(eps, 1.0 - eps)
+    q = prediction.clamp(eps, 1.0 - eps)
+    return p * (p.log() - q.log()) + (1.0 - p) * ((1.0 - p).log() - (1.0 - q).log())
+
+
+def topology_response_loss(
+    teacher_response: torch.Tensor,
+    student_response: torch.Tensor,
+    foreground_mask: torch.Tensor,
+    observation_status: torch.Tensor,
+    valid_tokens: torch.Tensor,
+) -> torch.Tensor:
+    """Category-balanced Bernoulli KL on matched, valid CFP--FFA tokens.
+
+    Status values are 1 (present), 0 (verified absent), and -1 (unavailable).
+    """
+    losses = []
+    for batch_index in range(teacher_response.shape[0]):
+        valid = valid_tokens[batch_index].bool()
+        if not valid.any():
+            continue
+        category_losses = []
+        for category in range(teacher_response.shape[-1]):
+            status = int(observation_status[batch_index, category].item())
+            if status < 0:
+                continue
+            indices = torch.nonzero(valid, as_tuple=False).flatten()
+            if status == 1:
+                foreground = foreground_mask[batch_index, :, category].bool() & valid
+                background = (~foreground_mask[batch_index, :, category].bool()) & valid
+                foreground_indices = torch.nonzero(foreground, as_tuple=False).flatten()
+                background_indices = torch.nonzero(background, as_tuple=False).flatten()
+                if foreground_indices.numel() and background_indices.numel():
+                    count = min(foreground_indices.numel(), background_indices.numel())
+                    foreground_indices = foreground_indices[torch.randperm(foreground_indices.numel(), device=indices.device)[:count]]
+                    background_indices = background_indices[torch.randperm(background_indices.numel(), device=indices.device)[:count]]
+                    indices = torch.cat((foreground_indices, background_indices))
+            if indices.numel():
+                category_losses.append(
+                    _bernoulli_kl(
+                        teacher_response[batch_index, indices, category],
+                        student_response[batch_index, indices, category],
+                    ).mean()
+                )
+        if category_losses:
+            losses.append(torch.stack(category_losses).mean())
+    if not losses:
+        return student_response.sum() * 0.0
+    return torch.stack(losses).mean()

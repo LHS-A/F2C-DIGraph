@@ -10,42 +10,74 @@ import torch.nn.functional as F
 from torch import nn
 
 
+class RelationAwareSelfAttention(nn.Module):
+    """Multi-head self-attention whose probabilities are weighted by SCG edges."""
+
+    def __init__(self, dim: int, heads: int, dropout: float) -> None:
+        super().__init__()
+        if dim % heads:
+            raise ValueError("The semantic embedding dimension must be divisible by the number of heads.")
+        self.heads = heads
+        self.head_dim = dim // heads
+        self.q = nn.Linear(dim, dim)
+        self.k = nn.Linear(dim, dim)
+        self.v = nn.Linear(dim, dim)
+        self.out = nn.Linear(dim, dim)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor, edge_weight: torch.Tensor) -> torch.Tensor:
+        n, dim = x.shape
+        q = self.q(x).view(n, self.heads, self.head_dim).transpose(0, 1)
+        k = self.k(x).view(n, self.heads, self.head_dim).transpose(0, 1)
+        v = self.v(x).view(n, self.heads, self.head_dim).transpose(0, 1)
+        logits = q @ k.transpose(-1, -2) / math.sqrt(self.head_dim)
+        connected = edge_weight > 0
+        logits = logits + edge_weight.clamp_min(1e-12).log().unsqueeze(0)
+        logits = logits.masked_fill(~connected.unsqueeze(0), torch.finfo(logits.dtype).min)
+        attn = self.dropout(torch.softmax(logits, dim=-1))
+        out = (attn @ v).transpose(0, 1).reshape(n, dim)
+        return self.out(out)
+
+
 class SemanticDynamicLayer(nn.Module):
-    """One S-DynEnc layer with adjacency-constrained self-attention."""
+    """One adjacency-constrained dynamic refinement and RSA layer."""
 
     def __init__(self, dim: int = 768, heads: int = 8, dropout: float = 0.1) -> None:
         super().__init__()
-        self.wq = nn.Linear(dim, dim)
-        self.wk = nn.Linear(dim, dim)
-        self.alpha = nn.Parameter(torch.zeros(()))
-        self.attn = nn.MultiheadAttention(dim, heads, dropout=dropout, batch_first=True)
+        self.affinity_q = nn.Linear(dim, dim)
+        self.affinity_k = nn.Linear(dim, dim)
+        self.rsa = RelationAwareSelfAttention(dim, heads, dropout)
         self.ln1 = nn.LayerNorm(dim)
-        self.ffn = nn.Sequential(nn.Linear(dim, dim * 4), nn.GELU(), nn.Dropout(dropout), nn.Linear(dim * 4, dim))
+        self.ffn = nn.Sequential(
+            nn.Linear(dim, dim * 4), nn.GELU(), nn.Dropout(dropout), nn.Linear(dim * 4, dim)
+        )
         self.ln2 = nn.LayerNorm(dim)
 
-    def forward(self, e: torch.Tensor, a0: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        q = self.wq(e)
-        k = self.wk(e)
-        s_dyn = torch.softmax((q @ k.transpose(-1, -2)) / math.sqrt(q.shape[-1]), dim=-1)
-        a_hat = F.relu(a0 + self.alpha * (a0 * s_dyn))
-        mask = a_hat <= 0
-        attn_out, _ = self.attn(e.unsqueeze(0), e.unsqueeze(0), e.unsqueeze(0), attn_mask=mask)
-        e_rsa = self.ln1(attn_out.squeeze(0) + e)
-        out = self.ln2(self.ffn(e_rsa) + e_rsa)
-        return out, a_hat
+    def forward(self, e: torch.Tensor, a0: torch.Tensor, alpha: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        q = self.affinity_q(e)
+        k = self.affinity_k(e)
+        s_sem = q @ k.transpose(-1, -2) / math.sqrt(q.shape[-1])
+        a_hat = F.relu(a0 + alpha * (a0 * s_sem))
+        a_hat = a_hat.clone()
+        a_hat.diagonal().clamp_(min=1.0)
+        h = self.ln1(e + self.rsa(e, a_hat))
+        return self.ln2(h + self.ffn(h)), a_hat
 
 
 class SemanticDynamicEncoder(nn.Module):
-    """Stack three dynamic semantic graph layers by default."""
+    """The two-layer S-DynEnc described in the updated methodology."""
 
-    def __init__(self, dim: int = 768, heads: int = 8, layers: int = 3, dropout: float = 0.1) -> None:
+    def __init__(self, dim: int = 768, heads: int = 8, layers: int = 2, dropout: float = 0.1) -> None:
         super().__init__()
+        if layers != 2:
+            raise ValueError("The updated methodology specifies exactly two S-DynEnc layers.")
+        self.alpha = nn.Parameter(torch.zeros(()))
         self.layers = nn.ModuleList([SemanticDynamicLayer(dim, heads, dropout) for _ in range(layers)])
 
     def forward(self, e0: torch.Tensor, a0: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         h = e0
         a_hat = a0
         for layer in self.layers:
-            h, a_hat = layer(h, a0)
+            h, a_hat = layer(h, a0, self.alpha)
         return h, a_hat
 

@@ -2,7 +2,7 @@ extends: configs/default.yaml
 mode: train_teacher
 strict_reproduction: true
 data:
-  image_size: 512
+  image_size: 1024
   n_folds: 5
   val_fraction: 0.15
   num_workers: 4

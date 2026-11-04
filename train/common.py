@@ -35,7 +35,9 @@ def build_loader(cfg: Dict, split: str, fold: int, train: bool, require_masks: b
         train=train,
         require_masks=require_masks,
         mask_csv=cfg["paths"].get("mask_csv"),
-        tpg_feature_csv=cfg["paths"].get("tpg_feature_csv"),
+        rho_cross=cfg["data"].get("rho_cross", 0.1),
+        kappa=cfg["data"].get("kappa", 8),
+        min_valid_overlap=cfg["data"].get("min_valid_overlap", 0.9),
     )
     sampler = build_weighted_sampler(ds) if train else None
     return DataLoader(
@@ -56,11 +58,27 @@ def evaluate_classifier(model: torch.nn.Module, loader: DataLoader, device: torc
     y_prob = []
     is_teacher = getattr(model, "is_teacher", False) or getattr(getattr(model, "module", None), "is_teacher", False)
     for batch in tqdm(loader, desc="evaluate", leave=False):
-        x = batch["ffa"].to(device) if is_teacher else batch["cfp"].to(device)
-        logits = model(x)["logits"]
+        if is_teacher:
+            batch = move_batch_to_device(batch, device)
+            logits = model(batch)["logits"]
+        else:
+            logits = model(batch["cfp"].to(device))["logits"]
         y_true.extend(batch["label"].cpu().numpy().tolist())
         y_prob.append(torch.softmax(logits, dim=-1).cpu().numpy())
     return compute_metrics(y_true, np.concatenate(y_prob, axis=0), list(classes))
+
+
+def move_batch_to_device(batch: Dict[str, object], device: torch.device) -> Dict[str, object]:
+    """Recursively move tensor-valued batch fields without touching metadata."""
+    moved = {}
+    for key, value in batch.items():
+        if torch.is_tensor(value):
+            moved[key] = value.to(device)
+        elif isinstance(value, dict):
+            moved[key] = move_batch_to_device(value, device)
+        else:
+            moved[key] = value
+    return moved
 
 
 def load_semantic_initialization(retinabert_ckpt: str, cfg: Dict, device: torch.device):

@@ -4,7 +4,7 @@ paths:
   output_dir: outputs
   checkpoints: outputs/checkpoints
   logs: outputs/logs
-  umls_concepts: resources/umls_retina_concepts.csv
+  umls_concepts: outputs/knowledge/umls_retina_concepts.csv
   retinabert_ckpt: outputs/checkpoints/retinabert.pth
 retinabert:
   pretrained_name: emilyalsentzer/Bio_ClinicalBERT
@@ -17,4 +17,3 @@ retinabert:
   weight_decay: 0.2
   warmup_steps: 10000
   tau: 0.07
-  semantic_types: [T033, T047]

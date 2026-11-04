@@ -12,9 +12,7 @@ from tqdm import tqdm
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from models.f2c_digraph import CfpStudent, F2CDIGraph, FfaTeacher
-from models.semantic_dynamic_encoder import SemanticDynamicEncoder
-from models.topological_dynamic_encoder import TopologicalDynamicEncoder
-from train.common import build_loader, device_and_wrap, load_semantic_initialization
+from train.common import build_loader, device_and_wrap, load_semantic_initialization, move_batch_to_device
 from utils.checkpoint import load_checkpoint, save_checkpoint
 from utils.config import load_config
 from utils.logger import setup_logger
@@ -28,8 +26,7 @@ def evaluate_student(model, loader, device, classes):
     model.eval()
     y_true, y_prob = [], []
     for batch in tqdm(loader, desc="student evaluate", leave=False):
-        for key in ("cfp", "ffa", "label"):
-            batch[key] = batch[key].to(device)
+        batch = move_batch_to_device(batch, device)
         out = model(batch)
         y_true.extend(batch["label"].cpu().numpy().tolist())
         y_prob.append(torch.softmax(out["logits"], dim=-1).cpu().numpy())
@@ -47,27 +44,34 @@ def run(config_path: str, fold: int, teacher_ckpt: str, retinabert_ckpt: str):
     if cfg.get("require_cuda", False) and device.type != "cuda":
         raise RuntimeError("CUDA is required by config but torch.cuda.is_available() is False.")
 
+    e0, a0 = load_semantic_initialization(retinabert_ckpt, cfg, device)
     teacher = FfaTeacher(
         len(cfg["data"]["classes"]),
-        cfg["model"]["embed_dim"],
+        e0,
+        a0,
+        embed_dim=cfg["model"]["embed_dim"],
         pretrained=False,
+        heads=cfg["model"]["heads"],
+        semantic_layers=cfg["model"]["semantic_layers"],
+        topology_layers=cfg["model"]["topology_layers"],
+        dropout=cfg["model"]["dropout"],
         backbone=cfg["model"].get("backbone", "resnet50"),
     )
     teacher_state = load_checkpoint(teacher_ckpt, map_location="cpu")["model"]
     teacher.load_state_dict(teacher_state)
-    for p in teacher.parameters():
-        p.requires_grad = False
+    teacher.eval()
+    with torch.no_grad():
+        fixed_semantic_basis, _ = teacher.semantic_basis()
     student = CfpStudent(
         len(cfg["data"]["classes"]),
-        cfg["model"]["embed_dim"],
-        cfg["model"].get("pretrained", True),
-        cfg["model"]["heads"],
-        cfg["model"].get("backbone", "resnet50"),
+        fixed_semantic_basis,
+        embed_dim=cfg["model"]["embed_dim"],
+        pretrained=cfg["model"].get("pretrained", True),
+        heads=cfg["model"]["heads"],
+        dropout=cfg["model"]["dropout"],
+        backbone=cfg["model"].get("backbone", "resnet50"),
     )
-    sem_encoder = SemanticDynamicEncoder(cfg["model"]["embed_dim"], cfg["model"]["heads"], cfg["model"]["semantic_layers"], cfg["model"]["dropout"])
-    topo_encoder = TopologicalDynamicEncoder(cfg["model"]["embed_dim"], cfg["model"]["topology_layers"], cfg["model"]["topology_bases"])
-    e0, a0 = load_semantic_initialization(retinabert_ckpt, cfg, device)
-    model = F2CDIGraph(teacher, student, sem_encoder, topo_encoder, e0, a0, cfg["model"]["embed_dim"])
+    model = F2CDIGraph(teacher, student)
     device, model = device_and_wrap(model, cfg.get("multi_gpu", True))
     trainable = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(trainable, lr=cfg["training"]["lr"], weight_decay=cfg["training"]["weight_decay"])
@@ -80,8 +84,7 @@ def run(config_path: str, fold: int, teacher_ckpt: str, retinabert_ckpt: str):
         lam_sem = distill_weight(epoch, cfg["training"]["epochs"], cfg["training"]["lambda_sem_max"], cfg["training"]["distill_warmup_fraction"])
         lam_topo = distill_weight(epoch, cfg["training"]["epochs"], cfg["training"]["lambda_topo_max"], cfg["training"]["distill_warmup_fraction"])
         for batch in tqdm(train_loader, desc=f"student fold {fold} epoch {epoch + 1}"):
-            for key in ("cfp", "ffa", "label"):
-                batch[key] = batch[key].to(device)
+            batch = move_batch_to_device(batch, device)
             opt.zero_grad(set_to_none=True)
             with torch.cuda.amp.autocast(enabled=scaler.is_enabled()):
                 outputs = model(batch)
@@ -101,7 +104,12 @@ def run(config_path: str, fold: int, teacher_ckpt: str, retinabert_ckpt: str):
         if auc == auc and auc > best_auc:
             best_auc = auc
             state = model.module.state_dict() if hasattr(model, "module") else model.state_dict()
-            save_checkpoint(f"{cfg['paths']['checkpoints']}/fold{fold}_student_best.pth", {"model": state, "metrics": metrics, "config": cfg})
+            bare_model = model.module if hasattr(model, "module") else model
+            inference_state = bare_model.student.inference_model.state_dict()
+            save_checkpoint(
+                f"{cfg['paths']['checkpoints']}/fold{fold}_student_best.pth",
+                {"model": state, "inference_model": inference_state, "metrics": metrics, "config": cfg},
+            )
     return best_auc
 
 

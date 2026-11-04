@@ -64,28 +64,41 @@ SCG_NODES = ["[CLS]"] + DISEASES + ANATOMY + FINDINGS + OTHER_NODES
 
 
 def load_sgc_nodes(path: Optional[str], target_k: int = 66) -> Tuple[List[str], List[str]]:
-    """Load SCG node names and definitions from ``name: definition`` text."""
-    if not path or not Path(path).exists():
-        nodes = SCG_NODES[:target_k]
-        texts = nodes
-        return nodes, texts
-    nodes = ["[CLS]"]
-    texts = ["global retinal diagnostic root node"]
-    for line in Path(path).read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or ":" not in line:
-            continue
-        name, definition = line.split(":", 1)
-        name = name.strip()
-        definition = definition.strip()
-        if name:
-            nodes.append(name)
-            texts.append(f"{name}. Definition: {definition}" if definition else name)
-    while len(nodes) < target_k:
-        i = len(nodes)
-        nodes.append(f"Others {i}")
-        texts.append(f"Others {i}. Definition: disease-specific residual retinal finding node")
-    return nodes[:target_k], texts[:target_k]
+    """Return the fixed 66-node taxonomy and attach supplied descriptions by name."""
+    if target_k != 66:
+        raise ValueError("The updated SCG has exactly K=66 nodes.")
+    definitions: Dict[str, str] = {}
+    if path and Path(path).exists():
+        for line in Path(path).read_text(encoding="utf-8").splitlines():
+            if ":" not in line:
+                continue
+            name, definition = (part.strip() for part in line.split(":", 1))
+            definitions[name.casefold()] = definition
+    aliases = {
+        "AMD": "age-related macular degeneration",
+        "CSC": "central serous chorioretinopathy",
+        "DR": "diabetic retinopathy",
+        "RVO": "retinal vein occlusion",
+        "Vasculature": "retinal vasculature",
+        "Veins": "retinal veins",
+        "Capillary network": "retinal capillary network",
+    }
+    texts = []
+    for node in SCG_NODES:
+        key = node.casefold()
+        definition = definitions.get(key) or definitions.get(aliases.get(node, "").casefold(), "")
+        if node == "[CLS]":
+            definition = "global retinal diagnostic aggregation node"
+        elif node.startswith("Others") and not definition:
+            definition = "diagnosis-associated residual retinal finding outside the predefined branches"
+        elif not definition and node in DISEASES:
+            definition = f"expert-verified retinal diagnostic category: {node}"
+        elif not definition and node in ANATOMY:
+            definition = f"expert-verified retinal anatomical region: {node}"
+        elif not definition and node in FINDINGS:
+            definition = f"expert-verified retinal clinical finding: {node}"
+        texts.append(f"{node}. Definition: {definition}" if definition else node)
+    return list(SCG_NODES), texts
 
 
 def build_default_scg(nodes_path: Optional[str] = None, target_k: int = 66) -> Tuple[List[str], torch.Tensor, Dict[str, int]]:
@@ -136,10 +149,11 @@ def build_default_scg(nodes_path: Optional[str] = None, target_k: int = 66) -> T
                 for b in ids:
                     if a != b:
                         adj[a, b] = 1.0
-        for node in [n for n in nodes if n.lower().startswith("others")]:
-            for disease in DISEASES:
-                adj[idx[disease], idx[node]] = 1.0
-                adj[idx[node], idx[disease]] = 1.0
+        others = [n for n in nodes if n.lower().startswith("others")]
+        for position, node in enumerate(others):
+            disease = DISEASES[position % len(DISEASES)]
+            adj[idx[disease], idx[node]] = 1.0
+            adj[idx[node], idx[disease]] = 1.0
     else:
         disease_ids = list(range(1, min(6, len(nodes))))
         anatomy_ids = list(range(6, min(14, len(nodes))))

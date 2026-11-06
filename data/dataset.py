@@ -55,7 +55,6 @@ class RetinaDualDataset(Dataset):
         mask_csv: Optional[str] = None,
         rho_cross: float = 0.1,
         kappa: int = 8,
-        min_valid_overlap: float = 0.9,
     ) -> None:
         self.df, self.schema = load_and_infer(csv_path)
         self.df = attach_split(self.df, self.schema, split_csv, fold)
@@ -76,7 +75,6 @@ class RetinaDualDataset(Dataset):
         self.require_masks = require_masks
         self.rho_cross = rho_cross
         self.kappa = kappa
-        self.min_valid_overlap = min_valid_overlap
         self.transform = build_transforms(image_size, train=train)
         self.mask_df = None
         self.mask_schema = None
@@ -114,12 +112,16 @@ class RetinaDualDataset(Dataset):
                 phase_tokens = {"early": ("early", "arterial"), "mid": ("mid", "venous"), "late": ("late",)}[phase]
                 candidates = [path for path in paths if any(token in Path(path).stem.lower() for token in phase_tokens)]
             phase_paths.append(candidates[0] if candidates else None)
-        missing = [phase for phase, path in zip(("early", "mid", "late"), phase_paths) if not path]
-        if missing:
+        available = [index for index, path in enumerate(phase_paths) if path]
+        if not available:
             raise FileNotFoundError(
-                "The updated method requires registered grayscale early-, mid-, and late-phase FFA keyframes; "
-                f"missing identifiable phases: {missing}. Use phase-named columns or filenames."
+                "No identifiable early-, mid-, or late-phase FFA keyframe was found. "
+                "Use phase-named columns or filenames."
             )
+        for index, path in enumerate(phase_paths):
+            if path is None:
+                nearest = min(available, key=lambda candidate: (abs(candidate - index), candidate))
+                phase_paths[index] = phase_paths[nearest]
         return [str(path) for path in phase_paths]
 
     def _mask_paths(self, row: pd.Series) -> Dict[str, List[str]]:
@@ -137,52 +139,6 @@ class RetinaDualDataset(Dataset):
                     if values:
                         out[mask_type] = values
         return out
-
-    @staticmethod
-    def _parse_status(value: object) -> Optional[int]:
-        if pd.isna(value):
-            return None
-        text = str(value).strip().lower().replace("_", " ")
-        if text in {"1", "present", "positive", "observed"}:
-            return 1
-        if text in {"0", "absent", "verified absent", "negative", "verified negative"}:
-            return 0
-        if text in {"-1", "unavailable", "unknown", "not observed", "inadequate", "missing"}:
-            return -1
-        return None
-
-    def _observation_status(self, row: pd.Series, mask_paths: Dict[str, List[str]]) -> np.ndarray:
-        status = np.full(len(MASK_TYPES), -1, dtype=np.int64)
-        aliases = {
-            "RV": ("rv", "vessel"), "MA": ("ma", "microaneurysm"),
-            "NPA": ("npa", "nonperfusion"), "NV": ("nv", "neovascular"),
-            "LEAKAGE": ("leakage", "leak", "extravasation"),
-        }
-        sources = [row]
-        if self.mask_df is not None and self.mask_schema is not None:
-            patient = str(row[self.schema.patient_col])
-            candidates = self.mask_df[self.mask_df["_patient_key"] == patient]
-            if not candidates.empty:
-                sources.append(candidates.iloc[0])
-        for index, structure in enumerate(MASK_TYPES):
-            found = False
-            for source in sources:
-                for column in source.index:
-                    name = str(column).lower()
-                    if ("status" in name or "observation" in name) and any(alias in name for alias in aliases[structure]):
-                        parsed = self._parse_status(source[column])
-                        if parsed is not None:
-                            status[index] = parsed
-                            found = True
-                            break
-                if found:
-                    break
-            else:
-                # A non-empty verified mask proves presence. Missing masks never
-                # prove absence and therefore default to unavailable.
-                if mask_paths.get(structure):
-                    status[index] = 1
-        return status
 
     def _valid_overlap(self, row: pd.Series) -> np.ndarray:
         paths = []
@@ -222,18 +178,13 @@ class RetinaDualDataset(Dataset):
         ffa_paths = self._ffa_paths(row)
         mask_paths = self._mask_paths(row)
         raw_masks = {name: merge_mask_paths(mask_paths.get(name, []), self.image_size) for name in MASK_TYPES}
-        status = self._observation_status(row, mask_paths)
+        presence = np.asarray([int(raw_masks[structure].any()) for structure in MASK_TYPES], dtype=np.int64)
         cfp, ffa, masks, valid_overlap = self.transform(
             _load_image(cfp_path, "RGB"),
             [_load_image(path, "L") for path in ffa_paths],
             raw_masks,
             self._valid_overlap(row),
         )
-        if float(valid_overlap.mean()) < self.min_valid_overlap:
-            status[status == 1] = -1
-        for structure_index, structure in enumerate(MASK_TYPES):
-            if status[structure_index] == 1 and not masks[structure].any():
-                status[structure_index] = -1
         sample = {
             "cfp": cfp,
             "ffa": ffa,
@@ -242,7 +193,7 @@ class RetinaDualDataset(Dataset):
             "cfp_path": cfp_path,
             "ffa_paths": ffa_paths,
             "structure_masks": torch.from_numpy(np.stack([masks[name] for name in MASK_TYPES])).float(),
-            "observation_status": torch.from_numpy(status).long(),
+            "structure_presence": torch.from_numpy(presence).long(),
             "valid_overlap": valid_overlap,
         }
         if self.require_masks:
@@ -260,7 +211,7 @@ def collate_with_tpg(batch: List[Dict[str, object]]) -> Dict[str, object]:
         "cfp_path": [b["cfp_path"] for b in batch],
         "ffa_paths": [b["ffa_paths"] for b in batch],
         "structure_masks": torch.stack([b["structure_masks"] for b in batch]),
-        "observation_status": torch.stack([b["observation_status"] for b in batch]),
+        "structure_presence": torch.stack([b["structure_presence"] for b in batch]),
         "valid_overlap": torch.stack([b["valid_overlap"] for b in batch]),
     }
     if "tpg" in batch[0]:

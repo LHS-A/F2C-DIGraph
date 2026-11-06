@@ -41,13 +41,10 @@ def topology_response_loss(
     teacher_response: torch.Tensor,
     student_response: torch.Tensor,
     foreground_mask: torch.Tensor,
-    observation_status: torch.Tensor,
+    structure_presence: torch.Tensor,
     valid_tokens: torch.Tensor,
 ) -> torch.Tensor:
-    """Category-balanced Bernoulli KL on matched, valid CFP--FFA tokens.
-
-    Status values are 1 (present), 0 (verified absent), and -1 (unavailable).
-    """
+    """Five-category Bernoulli KL on matched, valid CFP--FFA tokens."""
     losses = []
     for batch_index in range(teacher_response.shape[0]):
         valid = valid_tokens[batch_index].bool()
@@ -55,11 +52,9 @@ def topology_response_loss(
             continue
         category_losses = []
         for category in range(teacher_response.shape[-1]):
-            status = int(observation_status[batch_index, category].item())
-            if status < 0:
-                continue
+            present = bool(structure_presence[batch_index, category].item())
             indices = torch.nonzero(valid, as_tuple=False).flatten()
-            if status == 1:
+            if present:
                 foreground = foreground_mask[batch_index, :, category].bool() & valid
                 background = (~foreground_mask[batch_index, :, category].bool()) & valid
                 foreground_indices = torch.nonzero(foreground, as_tuple=False).flatten()

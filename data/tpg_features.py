@@ -62,8 +62,6 @@ def _component_features(
     labels = measure.label(mask, connectivity=2)
     features, centroids, boundaries = [], [], []
     for region in measure.regionprops(labels):
-        if region.area <= 2:
-            continue
         component = labels == region.label
         area = float(region.area)
         perimeter = float(region.perimeter)
@@ -106,17 +104,21 @@ def _rv_features(
     critical = skeleton & (degree != 2)
     critical_labels = measure.label(critical, connectivity=2)
     true_bifurcations: set[int] = set()
+    crossing_centers: Dict[int, np.ndarray] = {}
     for region in measure.regionprops(critical_labels):
         cluster = critical_labels == region.label
         dilation_ring = morphology.binary_dilation(cluster, morphology.square(3)) & skeleton & ~cluster
         outgoing = measure.label(dilation_ring, connectivity=2).max()
         if outgoing == 3 or outgoing >= 5:
             true_bifurcations.add(region.label)
+        elif outgoing == 4:
+            crossing_centers[region.label] = np.asarray(region.centroid, dtype=np.float32)
 
     corridors = skeleton & ~critical
     corridor_labels = measure.label(corridors, connectivity=2)
     distance = cv2.distanceTransform(vessel_mask.astype(np.uint8), cv2.DIST_L2, 5)
     features, centroids, boundaries, shared = [], [], [], []
+    segment_crossings: List[set[int]] = []
     for region in measure.regionprops(corridor_labels):
         coords = region.coords
         if coords.shape[0] < 2:
@@ -126,15 +128,59 @@ def _rv_features(
         key_ids = set(np.unique(critical_labels[adjacent]).tolist()) - {0}
         bif_ids = key_ids & true_bifurcations
         length = float(coords.shape[0])
-        endpoints = coords[np.argmax(cdist(coords[[0]], coords), axis=1)[0]]
-        start = coords[0]
-        chord = float(np.linalg.norm(endpoints.astype(float) - start.astype(float)).clip(min=1e-6))
+        corridor_degree = _neighbor_count(corridor)
+        endpoints = np.argwhere(corridor & (corridor_degree <= 1))
+        if endpoints.shape[0] >= 2:
+            chord = float(cdist(endpoints, endpoints).max())
+        else:
+            centered = coords.astype(np.float32) - coords.mean(axis=0, keepdims=True)
+            axis = np.linalg.svd(centered, full_matrices=False)[2][0]
+            projection = centered @ axis
+            chord = float(projection.max() - projection.min())
+        chord = max(chord, 1e-6)
         radii = distance[coords[:, 0], coords[:, 1]]
         area = float(np.maximum(2.0 * radii, 1.0).sum())
         features.append(np.asarray([area, length, length / chord, np.std(radii)], dtype=np.float32))
         centroids.append(tuple(coords.mean(axis=0)))
         boundaries.append(coords.astype(np.float32))
         shared.append(bif_ids)
+        segment_crossings.append(key_ids & set(crossing_centers))
+
+    # A four-way crossing contains two distinct vessels. Pair the most nearly
+    # opposite outgoing segments and connect only each continuation pair.
+    next_connection_id = int(critical_labels.max()) + 1
+    for crossing_id, center in crossing_centers.items():
+        members = [index for index, ids in enumerate(segment_crossings) if crossing_id in ids]
+        if len(members) < 2:
+            continue
+        directions = {}
+        for index in members:
+            coords = boundaries[index]
+            vector = coords[np.argmax(np.linalg.norm(coords - center, axis=1))] - center
+            norm = float(np.linalg.norm(vector))
+            directions[index] = vector / max(norm, 1e-6)
+        if len(members) == 4:
+            a, b, c, d = members
+            pairings = [((a, b), (c, d)), ((a, c), (b, d)), ((a, d), (b, c))]
+            pairs = min(
+                pairings,
+                key=lambda pairing: sum(float(np.dot(directions[left], directions[right])) for left, right in pairing),
+            )
+        else:
+            remaining = set(members)
+            pairs = []
+            while len(remaining) >= 2:
+                left, right = min(
+                    ((left, right) for left in remaining for right in remaining if left < right),
+                    key=lambda pair: float(np.dot(directions[pair[0]], directions[pair[1]])),
+                )
+                pairs.append((left, right))
+                remaining.remove(left)
+                remaining.remove(right)
+        for left, right in pairs:
+            shared[left].add(next_connection_id)
+            shared[right].add(next_connection_id)
+            next_connection_id += 1
 
     # A closed vessel loop has no keypoint and therefore no corridor after the
     # usual split; retain each such skeleton component as one segment.

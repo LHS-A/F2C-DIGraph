@@ -27,7 +27,6 @@ data:
   mask_types: [RV, MA, NPA, NV, LEAKAGE]
   rho_cross: 0.1
   kappa: 8
-  min_valid_overlap: 0.9
 
 model:
   backbone: resnet50

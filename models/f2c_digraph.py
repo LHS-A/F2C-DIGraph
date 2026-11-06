@@ -28,11 +28,6 @@ def _grid_valid_tokens(valid_overlap: torch.Tensor, grid_size: tuple[int, int]) 
     return coverage.flatten(2).squeeze(1).ge(1.0 - 1e-6)
 
 
-def _status_one_hot(status: torch.Tensor) -> torch.Tensor:
-    # Map unavailable/absent/present (-1/0/1) to a three-state indicator.
-    return F.one_hot((status.long() + 1).clamp(0, 2), num_classes=3).float().flatten(1)
-
-
 class FfaTeacher(nn.Module):
     """Three-channel grayscale FFA teacher with SIM and TIM supervision."""
 
@@ -53,7 +48,7 @@ class FfaTeacher(nn.Module):
         if backbone != "resnet50":
             raise ValueError("Strict reproduction uses an ImageNet-pretrained ResNet-50.")
         self.is_teacher = True
-        self.encoder = ResNet50Encoder(3, embed_dim, pretrained)
+        self.encoder = ResNet50Encoder(3, embed_dim, pretrained, project_global=True)
         self.semantic_encoder = SemanticDynamicEncoder(embed_dim, heads, semantic_layers, dropout)
         self.topology_encoder = TopologicalDynamicEncoder(embed_dim, topology_layers, 5)
         self.register_buffer("semantic_e0", semantic_e0.float())
@@ -61,8 +56,8 @@ class FfaTeacher(nn.Module):
         self.semantic_projection = nn.Linear(embed_dim, embed_dim)
         self.topology_q = nn.Linear(embed_dim, embed_dim)
         self.topology_k = nn.Linear(embed_dim, embed_dim)
-        # FFA feature + K semantic responses + 5 pooled topology responses + 15 status indicators.
-        self.classifier = nn.Linear(embed_dim + semantic_e0.shape[0] + 5 + 15, num_classes)
+        # FFA feature + K semantic responses + 5 pooled topology responses + 5 presence indicators.
+        self.classifier = nn.Linear(embed_dim + semantic_e0.shape[0] + 5 + 5, num_classes)
 
     def semantic_basis(self) -> tuple[torch.Tensor, torch.Tensor]:
         return self.semantic_encoder(self.semantic_e0, self.semantic_a0)
@@ -72,7 +67,7 @@ class FfaTeacher(nn.Module):
         tokens: torch.Tensor,
         topology_basis: torch.Tensor,
         structure_masks: torch.Tensor,
-        observation_status: torch.Tensor,
+        structure_presence: torch.Tensor,
         grid_size: tuple[int, int],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         logits = torch.einsum(
@@ -80,10 +75,8 @@ class FfaTeacher(nn.Module):
         ) / math.sqrt(tokens.shape[-1])
         preliminary = torch.sigmoid(logits)
         foreground = _grid_masks(structure_masks, grid_size)
-        present = observation_status.eq(1)[:, None, :]
-        absent = observation_status.eq(0)[:, None, :]
+        present = structure_presence.bool()[:, None, :]
         constrained = torch.where(present, foreground * (1.0 + preliminary) / 2.0, torch.zeros_like(preliminary))
-        constrained = torch.where(absent, torch.zeros_like(constrained), constrained)
         return constrained, foreground
 
     def forward(self, batch: Dict[str, object]) -> Dict[str, torch.Tensor]:
@@ -95,15 +88,14 @@ class FfaTeacher(nn.Module):
         h_topo = self.topology_encoder(batch["tpg"], visual["global"].device)
         grid_size = visual["feature_map"].shape[-2:]
         topology_response, foreground = self.topology_response(
-            visual["tokens"], h_topo, batch["structure_masks"], batch["observation_status"], grid_size
+            visual["tokens"], h_topo, batch["structure_masks"], batch["structure_presence"], grid_size
         )
         valid_tokens = _grid_valid_tokens(batch["valid_overlap"], grid_size)
         pooled_topology = (
             topology_response * valid_tokens[:, :, None]
         ).sum(dim=1) / valid_tokens.sum(dim=1, keepdim=True).clamp_min(1)
-        pooled_topology = pooled_topology * batch["observation_status"].ge(0).float()
         classifier_input = torch.cat(
-            (visual["global"], semantic_probability, pooled_topology, _status_one_hot(batch["observation_status"])),
+            (visual["global"], semantic_probability, pooled_topology, batch["structure_presence"].float()),
             dim=-1,
         )
         return {
@@ -135,7 +127,10 @@ class CfpInferenceModel(nn.Module):
         super().__init__()
         if backbone != "resnet50":
             raise ValueError("Strict reproduction uses an ImageNet-pretrained ResNet-50.")
-        self.encoder = ResNet50Encoder(3, embed_dim, pretrained)
+        # The inference encoder produces spatial tokens only. The global
+        # projection used by semantic distillation belongs to CfpStudent and
+        # is therefore absent from exported CFP-only checkpoints.
+        self.encoder = ResNet50Encoder(3, embed_dim, pretrained, project_global=False)
         self.topology_adapter = TopologyAdapter(embed_dim, heads, dropout)
         self.classifier = nn.Linear(embed_dim, num_classes)
         # It is fixed during training but retained and used at inference, so it
@@ -169,12 +164,15 @@ class CfpStudent(nn.Module):
         self.inference_model = CfpInferenceModel(
             num_classes, semantic_basis, embed_dim, pretrained, heads, dropout, backbone
         )
+        self.global_pool = nn.AdaptiveAvgPool2d(1)
+        self.global_projection = nn.Linear(2048, embed_dim)
         self.semantic_projection = nn.Linear(embed_dim, embed_dim)
         self.topology_projection = nn.Linear(embed_dim, 5)
 
     def forward(self, cfp: torch.Tensor, distill: bool = True) -> Dict[str, torch.Tensor]:
         out = self.inference_model(cfp)
         if distill:
+            out["global"] = self.global_projection(self.global_pool(out["feature_map"]).flatten(1))
             out["topology_response"] = torch.sigmoid(self.topology_projection(out["topology_tokens"]))
         return out
 
@@ -213,7 +211,7 @@ class F2CDIGraph(nn.Module):
             "student_topology_response": student["topology_response"],
             "foreground_tokens": teacher["foreground_tokens"],
             "valid_tokens": teacher["valid_tokens"],
-            "observation_status": batch["observation_status"],
+            "structure_presence": batch["structure_presence"],
         }
 
     def losses(
@@ -231,7 +229,7 @@ class F2CDIGraph(nn.Module):
             outputs["teacher_topology_response"],
             outputs["student_topology_response"],
             outputs["foreground_tokens"],
-            outputs["observation_status"],
+            outputs["structure_presence"],
             outputs["valid_tokens"],
         )
         total = classification + lambda_sem * semantic + lambda_topo * topology

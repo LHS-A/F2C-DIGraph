@@ -37,7 +37,6 @@ def build_loader(cfg: Dict, split: str, fold: int, train: bool, require_masks: b
         mask_csv=cfg["paths"].get("mask_csv"),
         rho_cross=cfg["data"].get("rho_cross", 0.1),
         kappa=cfg["data"].get("kappa", 8),
-        min_valid_overlap=cfg["data"].get("min_valid_overlap", 0.9),
     )
     sampler = build_weighted_sampler(ds) if train else None
     return DataLoader(

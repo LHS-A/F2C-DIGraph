@@ -40,7 +40,7 @@ paths:
   retinabert_ckpt: outputs/checkpoints/retinabert.pth
 ```
 
-The metadata CSV should contain registered CFP paths, early/mid/late FFA paths, disease labels, patient identifiers, reports, and present/verified-absent/unavailable observation states. The mask CSV stores phase-specific RV, MA, NPA, NV, and leakage masks. Geometry is synchronized across CFP, FFA, valid-overlap masks, and structure masks; the TPG is rebuilt after augmentation.
+The metadata CSV should contain registered CFP paths, available early/mid/late FFA paths, disease labels, patient identifiers, and reports. Missing FFA phases reuse the nearest available adjacent-phase frame. The mask CSV stores phase-specific RV, MA, NPA, NV, and leakage masks; each structure is marked present when its merged mask is non-empty and absent otherwise. Geometry is synchronized across CFP, FFA, valid-overlap masks, and structure masks, and the TPG is rebuilt after augmentation.
 
 ## Step 1: Train RetinaBERT
 

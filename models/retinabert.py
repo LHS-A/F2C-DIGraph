@@ -56,18 +56,13 @@ def load_umls_knowledge(path: str) -> List[KnowledgeSample]:
         if relation and tail and relation.lower() != "nan" and tail.lower() != "nan" and relation_key not in seen_relations:
             samples.append(KnowledgeSample(f"{concept} {relation} {tail}", cui, "relation"))
             seen_relations.add(relation_key)
-    forms: Dict[str, set] = {}
+    counts: Dict[str, int] = {}
     for sample in samples:
-        forms.setdefault(sample.cui, set()).add(sample.form)
-    incomplete = sorted(cui for cui, available in forms.items() if available != {"definition", "relation"})
-    if incomplete:
-        raise ValueError(
-            "Every CUI requires both a concept-definition and a concept-relation-concept description; "
-            f"incomplete CUIs: {incomplete[:10]}"
-        )
-    if not samples:
-        raise ValueError("No usable UMLS concept descriptions were found.")
-    return samples
+        counts[sample.cui] = counts.get(sample.cui, 0) + 1
+    eligible = {cui for cui, count in counts.items() if count >= 2}
+    if not eligible:
+        raise ValueError("RetinaBERT pretraining requires at least two descriptions for each sampled CUI.")
+    return [sample for sample in samples if sample.cui in eligible]
 
 
 class UMLSContrastiveDataset(Dataset):
@@ -78,11 +73,9 @@ class UMLSContrastiveDataset(Dataset):
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         self.cuis = sorted({s.cui for s in samples})
         self.cui_to_idx = {cui: i for i, cui in enumerate(self.cuis)}
-        self.by_cui: Dict[str, Dict[str, List[str]]] = {
-            cui: {"definition": [], "relation": []} for cui in self.cuis
-        }
+        self.by_cui: Dict[str, List[str]] = {cui: [] for cui in self.cuis}
         for sample in samples:
-            self.by_cui[sample.cui][sample.form].append(sample.text)
+            self.by_cui[sample.cui].append(sample.text)
         self.max_length = max_length
 
     def __len__(self) -> int:
@@ -90,8 +83,7 @@ class UMLSContrastiveDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         cui = self.cuis[idx]
-        descriptions = self.by_cui[cui]
-        pair = [random.choice(descriptions["definition"]), random.choice(descriptions["relation"])]
+        pair = random.sample(self.by_cui[cui], 2)
         enc = self.tokenizer(
             pair,
             padding="max_length",

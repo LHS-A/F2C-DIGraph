@@ -12,7 +12,13 @@ from torchvision import models
 class ResNet50Encoder(nn.Module):
     """ImageNet-pretrained ResNet-50 with dense tokens and global features."""
 
-    def __init__(self, in_channels: int = 3, embed_dim: int = 768, pretrained: bool = True) -> None:
+    def __init__(
+        self,
+        in_channels: int = 3,
+        embed_dim: int = 768,
+        pretrained: bool = True,
+        project_global: bool = True,
+    ) -> None:
         super().__init__()
         try:
             weights = models.ResNet50_Weights.IMAGENET1K_V2 if pretrained else None
@@ -32,8 +38,10 @@ class ResNet50Encoder(nn.Module):
         self.layer2 = resnet.layer2
         self.layer3 = resnet.layer3
         self.layer4 = resnet.layer4
-        self.pool = nn.AdaptiveAvgPool2d(1)
-        self.proj_global = nn.Linear(2048, embed_dim)
+        self.project_global = project_global
+        if project_global:
+            self.pool = nn.AdaptiveAvgPool2d(1)
+            self.proj_global = nn.Linear(2048, embed_dim)
         self.proj_tokens = nn.Conv2d(2048, embed_dim, kernel_size=1)
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
@@ -42,10 +50,11 @@ class ResNet50Encoder(nn.Module):
         z = self.layer2(z)
         z = self.layer3(z)
         fmap = self.layer4(z)
-        pooled = self.pool(fmap).flatten(1)
-        global_feat = self.proj_global(pooled)
         tokens = self.proj_tokens(fmap).flatten(2).transpose(1, 2)
-        return {"global": global_feat, "tokens": tokens, "feature_map": fmap}
+        output = {"tokens": tokens, "feature_map": fmap}
+        if self.project_global:
+            output["global"] = self.proj_global(self.pool(fmap).flatten(1))
+        return output
 
 
 class ImageClassifier(nn.Module):

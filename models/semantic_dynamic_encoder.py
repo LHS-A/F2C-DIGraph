@@ -58,9 +58,9 @@ class SemanticDynamicLayer(nn.Module):
         k = self.affinity_k(e)
         s_sem = q @ k.transpose(-1, -2) / math.sqrt(q.shape[-1])
         a_hat = F.relu(a0 + alpha * (a0 * s_sem))
-        a_hat = a_hat.clone()
-        a_hat.diagonal().clamp_(min=1.0)
-        h = self.ln1(e + self.rsa(e, a_hat))
+        message_adjacency = a_hat.clone()
+        message_adjacency.diagonal().fill_(1.0)
+        h = self.ln1(e + self.rsa(e, message_adjacency))
         return self.ln2(h + self.ffn(h)), a_hat
 
 

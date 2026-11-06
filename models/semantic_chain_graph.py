@@ -60,6 +60,9 @@ FINDINGS = [
     "Normal retinal appearance",
 ]
 OTHER_NODES = [f"Others {i + 1}" for i in range(14)]
+OTHER_NODE_TO_DISEASE = {
+    node: DISEASES[position % len(DISEASES)] for position, node in enumerate(OTHER_NODES)
+}
 SCG_NODES = ["[CLS]"] + DISEASES + ANATOMY + FINDINGS + OTHER_NODES
 
 
@@ -90,7 +93,11 @@ def load_sgc_nodes(path: Optional[str], target_k: int = 66) -> Tuple[List[str], 
         if node == "[CLS]":
             definition = "global retinal diagnostic aggregation node"
         elif node.startswith("Others") and not definition:
-            definition = "diagnosis-associated residual retinal finding outside the predefined branches"
+            disease = OTHER_NODE_TO_DISEASE[node]
+            definition = (
+                f"residual retinal finding associated with the {disease} diagnostic branch "
+                "outside its predefined findings"
+            )
         elif not definition and node in DISEASES:
             definition = f"expert-verified retinal diagnostic category: {node}"
         elif not definition and node in ANATOMY:
@@ -150,8 +157,8 @@ def build_default_scg(nodes_path: Optional[str] = None, target_k: int = 66) -> T
                     if a != b:
                         adj[a, b] = 1.0
         others = [n for n in nodes if n.lower().startswith("others")]
-        for position, node in enumerate(others):
-            disease = DISEASES[position % len(DISEASES)]
+        for node in others:
+            disease = OTHER_NODE_TO_DISEASE[node]
             adj[idx[disease], idx[node]] = 1.0
             adj[idx[node], idx[disease]] = 1.0
     else:
@@ -170,5 +177,7 @@ def build_default_scg(nodes_path: Optional[str] = None, target_k: int = 66) -> T
                 for j in linked:
                     if i != j:
                         adj[i, j] = 1.0
-    adj.fill_diagonal_(1.0)
+    # A0 contains expert-defined clinical edges only. Self-connections are
+    # introduced by the graph encoders/normalization exactly where specified.
+    adj.fill_diagonal_(0.0)
     return nodes, adj, idx

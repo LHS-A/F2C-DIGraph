@@ -2,7 +2,7 @@
 
 This repository provides the PyTorch implementation of **F2C-DIGraph** for CFP-only retinal disease diagnosis with cross-modal semantic and topological invariance distillation from FFA.
 
-FFA-Seg, the first publicly available five-category FFA segmentation dataset, is released at \url{https://zenodo.org/records/24129866}.
+FFA-Seg, the first publicly available five-category FFA segmentation dataset, is released at https://zenodo.org/records/24129866.
 
 The training pipeline contains three stages:
 

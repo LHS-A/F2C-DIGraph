@@ -15,5 +15,5 @@ retinabert:
   beta2: 0.999
   eps: 1.0e-8
   weight_decay: 0.2
-  warmup_steps: 10000
+  warmup_steps: 1000
   tau: 0.07
